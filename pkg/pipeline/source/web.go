@@ -59,49 +59,61 @@ func init() {
 }
 
 func NewWebSource(ctx context.Context, p *config.PipelineConfig) (*WebSource, error) {
-	ctx, span := tracer.Start(ctx, "WebInput.New")
-	defer span.End()
+    ctx, span := tracer.Start(ctx, "WebInput.New")
+    defer span.End()
 
-	p.Display = fmt.Sprintf(":%d", 10+rand.Intn(2147483637))
+    p.Display = fmt.Sprintf(":%d", 10+rand.Intn(2147483637))
 
-	s := &WebSource{
-		endRecording: make(chan struct{}),
-		info:         p.Info,
-	}
-	if p.AwaitStartSignal {
-		s.startRecording = make(chan struct{})
-	}
+    s := &WebSource{
+        endRecording: make(chan struct{}),
+        info:         p.Info,
+    }
+    if p.AwaitStartSignal {
+        s.startRecording = make(chan struct{})
+    }
 
-	if err := s.createPulseSink(ctx, p); err != nil {
-		logger.Errorw("failed to create pulse sink", err)
-		s.Close()
-		return nil, err
-	}
+    if err := s.createPulseSink(ctx, p); err != nil {
+        logger.Errorw("failed to create pulse sink", err)
+        s.Close()
+        return nil, err
+    }
 
-	if err := s.launchXvfb(ctx, p); err != nil {
-		logger.Errorw("failed to launch xvfb", err, "display", p.Display)
-		s.Close()
-		return nil, err
-	}
+    if err := s.launchXvfb(ctx, p); err != nil {
+        logger.Errorw("failed to launch xvfb", err, "display", p.Display)
+        s.Close()
+        return nil, err
+    }
 
-	var err error
-	chromeErr := make(chan error, 1)
-	go func() {
-		chromeErr <- s.launchChrome(ctx, p, p.Insecure)
-	}()
-	select {
-	case err = <-chromeErr:
-		// chrome launch completed
-	case <-time.After(chromeTimeout):
-		err = errors.ErrPageLoadFailed("timed out")
-	}
-	if err != nil {
-		logger.Warnw("failed to launch chrome", err)
-		s.Close()
-		return nil, err
-	}
+    var err error
+    maxRetries := 5
+    retryDelay := time.Second * 5
 
-	return s, nil
+    for attempt := 1; attempt <= maxRetries; attempt++ {
+        chromeErr := make(chan error, 1)
+        go func() {
+            chromeErr <- s.launchChrome(ctx, p, p.Insecure)
+        }()
+        select {
+        case err = <-chromeErr:
+            // chrome launch completed
+        case <-time.After(chromeTimeout):
+            err = errors.ErrPageLoadFailed("timed out")
+        }
+        if err == nil {
+			// Success
+			return s, nil
+		}
+
+		logger.Warnw("failed to launch chrome", err, "attempt", attempt)
+		if attempt < maxRetries {
+            logger.Infow("retrying to launch chrome", "attempt", attempt+1)
+            time.Sleep(retryDelay)
+        }
+    }
+
+    // All retries failed
+    s.Close()
+	return nil, err
 }
 
 func (s *WebSource) StartRecording() chan struct{} {
