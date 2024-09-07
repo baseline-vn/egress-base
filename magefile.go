@@ -164,7 +164,7 @@ func Build() error {
 		fmt.Sprintf("docker pull livekit/chrome-installer:%s", chromiumVersion),
 		fmt.Sprintf("docker pull livekit/gstreamer:%s-dev", gstVersion),
 		"docker pull livekit/egress-templates",
-		"docker build -t livekit/egress:latest -f build/egress/Dockerfile .",
+		"docker build --platform linux/amd64 -t dylandamsma/egress-base:latest -f build/egress/Dockerfile .",
 	)
 }
 
