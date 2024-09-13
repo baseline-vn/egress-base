@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
@@ -41,7 +40,7 @@ const (
 	endRecordingLog   = "END_RECORDING"
 
 	chromeFailedToStart = "chrome failed to start:"
-	chromeTimeout       = time.Second * 45
+	chromeTimeout       = time.Second * 30
 )
 
 type WebSource struct {
@@ -86,7 +85,7 @@ func NewWebSource(ctx context.Context, p *config.PipelineConfig) (*WebSource, er
     }
 
     var err error
-    maxRetries := 3
+    maxRetries := 5
     retryDelay := time.Second * 5
 
     for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -250,7 +249,6 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 		chromedp.Flag("disable-prompt-on-repost", true),
 		chromedp.Flag("disable-renderer-backgrounding", true),
 		chromedp.Flag("disable-sync", true),
-		chromedp.Flag("disable-quic", true),
 		chromedp.Flag("force-color-profile", "srgb"),
 		chromedp.Flag("metrics-recording-only", true),
 		chromedp.Flag("safebrowsing-disable-auto-update", true),
@@ -281,9 +279,7 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 	}
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	chromeCtx, chromeCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(func(format string, args ...interface{}) {
-		logger.Debugw("chrome internal", "message", fmt.Sprintf(format, args...))
-	}))
+	chromeCtx, chromeCancel := chromedp.NewContext(allocCtx)
 	s.closeChrome = func() {
 		chromeCancel()
 		allocCancel()
@@ -292,18 +288,6 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 	chromedp.ListenTarget(chromeCtx, func(ev interface{}) {
 		switch ev := ev.(type) {
 		case *runtime.EventConsoleAPICalled:
-			params := make([]string, len(ev.Args))
-			for i, arg := range ev.Args {
-				params[i] = string(arg.Value)
-			}
-			logMessage := fmt.Sprintf("Console %s: %s", ev.Type, strings.Join(params, " "))
-			logger.Debugw("Chrome console", "message", logMessage)
-			
-			// Check for QUIC protocol error
-			if strings.Contains(logMessage, "net::ERR_QUIC_PROTOCOL_ERROR") {
-				logger.Debugw("QUIC Protocol Error detected", "message", logMessage)
-			}
-
 			for _, arg := range ev.Args {
 				var val interface{}
 				err := json.Unmarshal(arg.Value, &val)
@@ -334,67 +318,15 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 					}
 				}
 			}
+
 		case *runtime.EventExceptionThrown:
-			logger.Debugw("JavaScript exception", "description", ev.ExceptionDetails.Text)
-		case *network.EventResponseReceived:
-			logger.Debugw("Network response",
-				"url", ev.Response.URL,
-				"status", ev.Response.Status,
-				"type", ev.Type)
-			if ev.Response.Status != 200 {
-				logger.Debugw("Non-200 response",
-					"url", ev.Response.URL,
-					"status", ev.Response.Status,
-					"statusText", ev.Response.StatusText)
-			}
-		case *network.EventLoadingFailed:
-			logger.Debugw("Network request failed",
-				"url", webUrl,
-				"errorText", ev.ErrorText,
-				"blockedReason", ev.BlockedReason)
+			logChrome("exception", ev)
 		}
 	})
 
 	var errString string
-	navigationCtx, cancel := context.WithTimeout(chromeCtx, 60*time.Second)
-	defer cancel()
-
-	err := chromedp.Run(navigationCtx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			logger.Debugw("Starting navigation")
-			return nil
-		}),
+	err := chromedp.Run(chromeCtx,
 		chromedp.Navigate(webUrl),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			logger.Debugw("Navigation completed")
-			return nil
-		}),
-		chromedp.Evaluate(`
-			window.addEventListener('error', function(event) {
-				console.error('JavaScript error:', event.message, 'at', event.filename, ':', event.lineno);
-			});
-		`, nil),
-	)
-
-	if err != nil {
-		if err == context.DeadlineExceeded {
-			logger.Debugw("Navigation timed out", "url", webUrl)
-			return errors.ErrPageLoadFailed("navigation timed out")
-		}
-		if strings.HasPrefix(err.Error(), chromeFailedToStart) {
-			return errors.ErrChromeFailedToStart(err)
-		}
-		logger.Debugw("Navigation failed", "error", err)
-		return errors.ErrPageLoadFailed(err.Error())
-	}
-
-	// Additional actions after navigation
-	err = chromedp.Run(chromeCtx,
-		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			logger.Debugw("Body is ready")
-			return nil
-		}),
 		chromedp.Evaluate(`
 			if (document.querySelector('div.error')) {
 				document.querySelector('div.error').innerText;
@@ -403,18 +335,16 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 			}`, &errString,
 		),
 	)
-
 	if err != nil {
-		logger.Debugw("Post-navigation actions failed", "error", err)
-		return errors.ErrPageLoadFailed(err.Error())
+		if strings.HasPrefix(err.Error(), chromeFailedToStart) {
+			return errors.ErrChromeFailedToStart(err)
+		}
+		errString = err.Error()
 	}
-
 	if errString != "" {
-		logger.Debugw("Page reported an error", "error", errString)
 		return errors.ErrPageLoadFailed(errString)
 	}
 
-	logger.Debugw("Chrome launch and navigation completed successfully")
 	return nil
 }
 
@@ -429,4 +359,3 @@ func logChrome(eventType string, ev interface{ MarshalJSON() ([]byte, error) }) 
 	}
 	logger.Debugw(fmt.Sprintf("chrome %s", eventType), values...)
 }
-
