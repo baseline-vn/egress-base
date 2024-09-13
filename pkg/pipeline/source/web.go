@@ -228,7 +228,7 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
-		chromedp.DisableGPU,
+		// chromedp.DisableGPU,
 
 		// puppeteer default behavior
 		chromedp.Flag("disable-infobars", true),
@@ -284,10 +284,6 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 		chromeCancel()
 		allocCancel()
 	}
-
-	// Add a timeout to the Chrome context to avoid hanging
-	chromeCtx, cancel := context.WithTimeout(chromeCtx, chromeTimeout)
-	defer cancel()
 
 	chromedp.ListenTarget(chromeCtx, func(ev interface{}) {
 		switch ev := ev.(type) {
