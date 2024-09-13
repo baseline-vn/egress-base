@@ -228,7 +228,7 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
-		// chromedp.DisableGPU, // {{ remove to enable GPU }}
+		chromedp.DisableGPU,
 
 		// puppeteer default behavior
 		chromedp.Flag("disable-infobars", true),
