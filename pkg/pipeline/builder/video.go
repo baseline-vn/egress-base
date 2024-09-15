@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/go-gst/go-glib/glib"
@@ -532,56 +531,76 @@ func (b *VideoBin) addEncoder() error {
 	}
 
 	switch b.conf.VideoOutCodec {
-	// we only encode h264, the rest are too slow
-	case types.MimeTypeH264:
-		x264Enc, err := gst.NewElement("x264enc")
-		if err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		x264Enc.SetArg("speed-preset", "veryfast")
-		if b.conf.KeyFrameInterval != 0 {
-			keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
-			if err = x264Enc.SetProperty("key-int-max", keyframeInterval); err != nil {
-				return errors.ErrGstPipelineError(err)
-			}
-		}
-		bufCapacity := uint(2000) // 2s
-		if b.conf.GetSegmentConfig() != nil {
-			// avoid key frames other than at segments boundaries as splitmuxsink can become inconsistent otherwise
-			if err = x264Enc.SetProperty("option-string", "scenecut=0"); err != nil {
-				return errors.ErrGstPipelineError(err)
-			}
-			bufCapacity = uint(time.Duration(b.conf.GetSegmentConfig().SegmentDuration) * (time.Second / time.Millisecond))
-		}
-		if bufCapacity > 10000 {
-			// Max value allowed by gstreamer
-			bufCapacity = 10000
-		}
-		if err = x264Enc.SetProperty("vbv-buf-capacity", bufCapacity); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if b.conf.GetStreamConfig() != nil {
-			x264Enc.SetArg("pass", "cbr")
-		}
-		if err = x264Enc.SetProperty("bitrate", uint(b.conf.VideoBitrate)); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
+    case types.MimeTypeH264:
+        // Try to create nvh264enc first
+        encoder, err := gst.NewElement("nvh264enc")
+        usingNVENC := true
 
-		caps, err := gst.NewElement("capsfilter")
-		if err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
-		if err = caps.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
-			"video/x-h264,profile=%s",
-			b.conf.VideoProfile,
-		))); err != nil {
-			return errors.ErrGstPipelineError(err)
-		}
+        // If nvh264enc is not available, fall back to x264enc
+        if err != nil {
+            logger.Infow("nvh264enc not available, falling back to x264enc", "error", err)
+            encoder, err = gst.NewElement("x264enc")
+            usingNVENC = false
+            if err != nil {
+                return errors.ErrGstPipelineError(err)
+            }
+        }
 
-		if err = b.bin.AddElements(x264Enc, caps); err != nil {
-			return err
-		}
-		return nil
+        // Configure encoder based on whether it's NVENC or x264
+        if usingNVENC {
+            if err = encoder.SetProperty("preset", "low-latency-hq"); err != nil {
+                return errors.ErrGstPipelineError(err)
+            }
+            if err = encoder.SetProperty("rc-mode", "cbr"); err != nil {
+                return errors.ErrGstPipelineError(err)
+            }
+        } else {
+            encoder.SetArg("speed-preset", "veryfast")
+            encoder.SetArg("tune", "zerolatency")
+            if b.conf.GetStreamConfig() != nil {
+                encoder.SetArg("pass", "cbr")
+            }
+        }
+
+        // Common settings for both encoders
+        if err = encoder.SetProperty("bitrate", uint(b.conf.VideoBitrate)); err != nil {
+            return errors.ErrGstPipelineError(err)
+        }
+
+        if b.conf.KeyFrameInterval != 0 {
+            keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
+            if usingNVENC {
+                if err = encoder.SetProperty("gop-size", keyframeInterval); err != nil {
+                    return errors.ErrGstPipelineError(err)
+                }
+            } else {
+                if err = encoder.SetProperty("key-int-max", keyframeInterval); err != nil {
+                    return errors.ErrGstPipelineError(err)
+                }
+            }
+        }
+
+        // Add h264parse element after the encoder
+        h264parse, err := gst.NewElement("h264parse")
+        if err != nil {
+            return errors.ErrGstPipelineError(err)
+        }
+
+        caps, err := gst.NewElement("capsfilter")
+        if err != nil {
+            return errors.ErrGstPipelineError(err)
+        }
+        if err = caps.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
+            "video/x-h264,profile=%s",
+            b.conf.VideoProfile,
+        ))); err != nil {
+            return errors.ErrGstPipelineError(err)
+        }
+
+        if err = b.bin.AddElements(encoder, h264parse, caps); err != nil {
+            return err
+        }
+        return nil
 
 	case types.MimeTypeVP9:
 		vp9Enc, err := gst.NewElement("vp9enc")
@@ -715,7 +734,7 @@ func (b *VideoBin) createSrcPad(trackID, name string) {
 
 	pad := b.selector.GetRequestPad("sink_%u")
 	pad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-		pts := uint64(info.GetBuffer().PresentationTimestamp())
+		pts := uint64(info.GetBuffer().PresentationTimestamp().Nanoseconds())
 		b.mu.Lock()
 		if pts < b.lastPTS || (b.selectedPad != videoTestSrcName && b.selectedPad != name) {
 			b.mu.Unlock()
@@ -735,7 +754,7 @@ func (b *VideoBin) createTestSrcPad() {
 
 	pad := b.selector.GetRequestPad("sink_%u")
 	pad.AddProbe(gst.PadProbeTypeBuffer, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-		pts := uint64(info.GetBuffer().PresentationTimestamp())
+		pts := uint64(info.GetBuffer().PresentationTimestamp().Nanoseconds())
 		b.mu.Lock()
 		if pts < b.lastPTS || (b.selectedPad != videoTestSrcName) {
 			b.mu.Unlock()

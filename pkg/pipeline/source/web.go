@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 
@@ -59,60 +60,66 @@ func init() {
 }
 
 func NewWebSource(ctx context.Context, p *config.PipelineConfig) (*WebSource, error) {
-    ctx, span := tracer.Start(ctx, "WebInput.New")
-    defer span.End()
+	ctx, span := tracer.Start(ctx, "WebInput.New")
+	defer span.End()
 
-    p.Display = fmt.Sprintf(":%d", 10+rand.Intn(2147483637))
+	p.Display = fmt.Sprintf(":%d", 10+rand.Intn(2147483637))
 
-    s := &WebSource{
-        endRecording: make(chan struct{}),
-        info:         p.Info,
-    }
-    if p.AwaitStartSignal {
-        s.startRecording = make(chan struct{})
-    }
+	s := &WebSource{
+		endRecording: make(chan struct{}),
+		info:         p.Info,
+	}
+	if p.AwaitStartSignal {
+		s.startRecording = make(chan struct{})
+	}
 
-    if err := s.createPulseSink(ctx, p); err != nil {
-        logger.Errorw("failed to create pulse sink", err)
-        s.Close()
-        return nil, err
-    }
+	if err := s.createPulseSink(ctx, p); err != nil {
+		logger.Errorw("failed to create pulse sink", err)
+		s.Close()
+		return nil, err
+	}
 
-    if err := s.launchXvfb(ctx, p); err != nil {
-        logger.Errorw("failed to launch xvfb", err, "display", p.Display)
-        s.Close()
-        return nil, err
-    }
+	if err := s.launchXvfb(ctx, p); err != nil {
+		logger.Errorw("failed to launch xvfb", err, "display", p.Display)
+		s.Close()
+		return nil, err
+	}
 
-    var err error
-    maxRetries := 5
-    retryDelay := time.Second * 5
+	var err error
+	maxRetries := 5
+	retryDelay := time.Second * 10
 
-    for attempt := 1; attempt <= maxRetries; attempt++ {
-        chromeErr := make(chan error, 1)
-        go func() {
-            chromeErr <- s.launchChrome(ctx, p, p.Insecure)
-        }()
-        select {
-        case err = <-chromeErr:
-            // chrome launch completed
-        case <-time.After(chromeTimeout):
-            err = errors.ErrPageLoadFailed("timed out")
-        }
-        if err == nil {
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		chromeErr := make(chan error, 1)
+		go func() {
+			chromeErr <- s.launchChrome(ctx, p, p.Insecure)
+		}()
+		select {
+		case err = <-chromeErr:
+			// chrome launch completed
+		case <-time.After(chromeTimeout):
+			err = errors.ErrPageLoadFailed("timed out")
+		}
+		if err == nil {
 			// Success
 			return s, nil
 		}
 
+		// Close Chrome if it's still running
+		if s.closeChrome != nil {
+			s.closeChrome()
+			s.closeChrome = nil
+		}
+
 		logger.Warnw("failed to launch chrome", err, "attempt", attempt)
 		if attempt < maxRetries {
-            logger.Infow("retrying to launch chrome", "attempt", attempt+1)
-            time.Sleep(retryDelay)
-        }
-    }
+			logger.Infow("retrying to launch chrome", "attempt", attempt+1)
+			time.Sleep(retryDelay)
+		}
+	}
 
-    // All retries failed
-    s.Close()
+	// All retries failed
+	s.Close()
 	return nil, err
 }
 
@@ -228,7 +235,7 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 	opts := []chromedp.ExecAllocatorOption{
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
-		// chromedp.DisableGPU,
+		chromedp.DisableGPU,
 
 		// puppeteer default behavior
 		chromedp.Flag("disable-infobars", true),
@@ -285,9 +292,25 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 		allocCancel()
 	}
 
+	// Enable network tracking
+	if err := chromedp.Run(chromeCtx, network.Enable()); err != nil {
+		logger.Errorw("failed to enable network tracking", err)
+		return err
+	}
+
 	chromedp.ListenTarget(chromeCtx, func(ev interface{}) {
 		switch ev := ev.(type) {
 		case *runtime.EventConsoleAPICalled:
+			if len(ev.Args) > 0 {
+				var messages []interface{}
+				for _, arg := range ev.Args {
+					var val interface{}
+					if err := json.Unmarshal(arg.Value, &val); err == nil {
+						messages = append(messages, val)
+					}
+				}
+				logger.Infow("chrome console message", "type", ev.Type, "args", messages)
+			}
 			for _, arg := range ev.Args {
 				var val interface{}
 				err := json.Unmarshal(arg.Value, &val)
@@ -321,6 +344,13 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig, 
 
 		case *runtime.EventExceptionThrown:
 			logChrome("exception", ev)
+
+		case *network.EventResponseReceived:
+			logger.Infow("network response received",
+				"url", ev.Response.URL,
+				"status", ev.Response.Status,
+				"mimeType", ev.Response.MimeType,
+			)
 		}
 	})
 
