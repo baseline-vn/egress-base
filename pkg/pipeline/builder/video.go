@@ -538,14 +538,20 @@ func (b *VideoBin) addEncoder() error {
 		if err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
-		x264Enc.SetArg("speed-preset", "superfast")
+		x264Enc.SetArg("speed-preset", "faster")
+		x264Enc.SetArg("tune", "zerolatency")
 		if b.conf.KeyFrameInterval != 0 {
 			keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
 			if err = x264Enc.SetProperty("key-int-max", keyframeInterval); err != nil {
 				return errors.ErrGstPipelineError(err)
 			}
 		}
-		bufCapacity := uint(3500) // 3.5s
+
+		if err = x264Enc.SetProperty("threads", uint(0)); err != nil {
+			return errors.ErrGstPipelineError(err)
+		}
+
+		bufCapacity := uint(2000) // 2s
 		if b.conf.GetSegmentConfig() != nil {
 			// avoid key frames other than at segments boundaries as splitmuxsink can become inconsistent otherwise
 			if err = x264Enc.SetProperty("option-string", "scenecut=0"); err != nil {

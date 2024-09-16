@@ -23,6 +23,7 @@ import (
 	"github.com/livekit/egress/pkg/stats"
 	"github.com/livekit/egress/pkg/types"
 	"github.com/livekit/protocol/livekit"
+	"github.com/livekit/protocol/logger"
 )
 
 const (
@@ -55,7 +56,7 @@ func New(conf config.UploadConfig, backup string, monitor *stats.HandlerMonitor)
 	case *livekit.AliOSSUpload:
 		u, err = newAliOSSUploader(c)
 	default:
-		return &localUploader{}, nil
+        return &localUploader{uploadsDir: "/app/recordings"}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -117,13 +118,25 @@ func (u *remoteUploader) Upload(localFilepath, storageFilepath string, outputTyp
 	return "", 0, uploadErr
 }
 
-type localUploader struct{}
+type localUploader struct{
+	uploadsDir string
+}
 
 func (u *localUploader) Upload(localFilepath, _ string, _ types.OutputType, _ bool, _ string) (string, int64, error) {
-	stat, err := os.Stat(localFilepath)
-	if err != nil {
-		return "", 0, err
-	}
+	if err := os.MkdirAll(u.uploadsDir, 0755); err != nil {
+        return "", 0, err
+    }
 
-	return localFilepath, stat.Size(), nil
+    destinationPath := path.Join(u.uploadsDir, path.Base(localFilepath))
+    if err := os.Rename(localFilepath, destinationPath); err != nil {
+        return "", 0, err
+    }
+
+    stat, err := os.Stat(destinationPath)
+    if err != nil {
+        return "", 0, err
+    }
+
+    logger.Infow("File moved to uploads directory", "file", path.Base(localFilepath))
+    return destinationPath, stat.Size(), nil
 }
