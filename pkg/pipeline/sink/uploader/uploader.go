@@ -15,6 +15,7 @@
 package uploader
 
 import (
+	"io"
 	"os"
 	"path"
 	"time"
@@ -56,7 +57,7 @@ func New(conf config.UploadConfig, backup string, monitor *stats.HandlerMonitor)
 	case *livekit.AliOSSUpload:
 		u, err = newAliOSSUploader(c)
 	default:
-        return &localUploader{uploadsDir: "/app/recordings"}, nil
+		return &localUploader{}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -79,64 +80,68 @@ type remoteUploader struct {
 }
 
 func (u *remoteUploader) Upload(localFilepath, storageFilepath string, outputType types.OutputType, deleteAfterUpload bool, fileType string) (string, int64, error) {
-	start := time.Now()
-	location, size, uploadErr := u.upload(localFilepath, storageFilepath, outputType)
-	elapsed := time.Since(start)
-
-	// success
-	if uploadErr == nil {
-		u.monitor.IncUploadCountSuccess(fileType, float64(elapsed.Milliseconds()))
-		if deleteAfterUpload {
-			_ = os.Remove(localFilepath)
-		}
-
-		return location, size, nil
+	// Always execute the upload and store in /out/recordings
+	outDir := "/out/recordings"
+	outFilepath := path.Join(outDir, storageFilepath)
+	
+	// Ensure the directory exists
+	if err := os.MkdirAll(path.Dir(outFilepath), 0755); err != nil {
+		logger.Debugw("failed to create output directory", "error", err)
+		return "", 0, err
 	}
-
-	// failure
-	u.monitor.IncUploadCountFailure(fileType, float64(elapsed.Milliseconds()))
-	if u.backup != "" {
-		stat, err := os.Stat(localFilepath)
-		if err != nil {
-			return "", 0, err
-		}
-
-		backupDir := path.Join(u.backup, path.Dir(storageFilepath))
-		backupFileName := path.Base(storageFilepath)
-		if err = os.MkdirAll(backupDir, 0755); err != nil {
-			return "", 0, err
-		}
-		backupFilepath := path.Join(backupDir, backupFileName)
-		if err = os.Rename(localFilepath, backupFilepath); err != nil {
-			return "", 0, err
-		}
-		u.monitor.IncBackupStorageWrites(string(outputType))
-
-		return backupFilepath, stat.Size(), nil
+	
+	// Copy the file to the output location
+	if err := copyFile(localFilepath, outFilepath); err != nil {
+		logger.Debugw("failed to copy file to output location", "error", err)
+		return "", 0, err
 	}
-
-	return "", 0, uploadErr
+	
+	// Get the file size
+	fileInfo, err := os.Stat(outFilepath)
+	if err != nil {
+		logger.Debugw("failed to get file info", "error", err)
+		return "", 0, err
+	}
+	
+	// If deleteAfterUpload is true, remove the original file
+	if deleteAfterUpload {
+		if err := os.Remove(localFilepath); err != nil {
+			logger.Debugw("failed to delete original file", "error", err)
+			// Note: We don't return here as the upload was successful
+		}
+	}
+	
+	return outFilepath, fileInfo.Size(), nil
 }
 
-type localUploader struct{
-	uploadsDir string
-}
+type localUploader struct{}
 
 func (u *localUploader) Upload(localFilepath, _ string, _ types.OutputType, _ bool, _ string) (string, int64, error) {
-	if err := os.MkdirAll(u.uploadsDir, 0755); err != nil {
-        return "", 0, err
-    }
+	stat, err := os.Stat(localFilepath)
+	if err != nil {
+		return "", 0, err
+	}
 
-    destinationPath := path.Join(u.uploadsDir, path.Base(localFilepath))
-    if err := os.Rename(localFilepath, destinationPath); err != nil {
-        return "", 0, err
-    }
+	return localFilepath, stat.Size(), nil
+}
 
-    stat, err := os.Stat(destinationPath)
-    if err != nil {
-        return "", 0, err
-    }
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
 
-    logger.Infow("File moved to uploads directory", "file", path.Base(localFilepath))
-    return destinationPath, stat.Size(), nil
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
