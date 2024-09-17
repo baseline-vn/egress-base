@@ -538,7 +538,7 @@ func (b *VideoBin) addEncoder() error {
 		if err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
-		x264Enc.SetArg("speed-preset", "faster")
+		x264Enc.SetArg("speed-preset", "veryfast")
 		x264Enc.SetArg("tune", "zerolatency")
 		if b.conf.KeyFrameInterval != 0 {
 			keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
