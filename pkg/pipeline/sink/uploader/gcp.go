@@ -22,34 +22,44 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 
 	"cloud.google.com/go/storage"
 	"github.com/googleapis/gax-go/v2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 
+	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/types"
-	"github.com/livekit/protocol/livekit"
 )
 
 const storageScope = "https://www.googleapis.com/auth/devstorage.read_write"
 
 type GCPUploader struct {
-	conf   *livekit.GCPUpload
-	client *storage.Client
+	conf                 *config.GCPConfig
+	prefix               string
+	generatePresignedUrl bool
+	client               *storage.Client
 }
 
-func newGCPUploader(conf *livekit.GCPUpload) (uploader, error) {
+func newGCPUploader(c *config.StorageConfig) (uploader, error) {
+	if c.GeneratePresignedUrl {
+		return nil, errors.ErrUploadFailed("GCP", fmt.Errorf("presigned URLs not supported"))
+	}
+
+	conf := c.GCP
 	u := &GCPUploader{
-		conf: conf,
+		conf:                 conf,
+		prefix:               c.PathPrefix,
+		generatePresignedUrl: c.GeneratePresignedUrl,
 	}
 
 	var opts []option.ClientOption
-	if conf.Credentials != "" {
-		jwtConfig, err := google.JWTConfigFromJSON([]byte(conf.Credentials), storageScope)
+	if conf.CredentialsJSON != "" {
+		jwtConfig, err := google.JWTConfigFromJSON([]byte(conf.CredentialsJSON), storageScope)
 		if err != nil {
-			return nil, err
+			return nil, errors.ErrUploadFailed("GCP", err)
 		}
 		opts = append(opts, option.WithTokenSource(jwtConfig.TokenSource(context.Background())))
 	}
@@ -57,32 +67,34 @@ func newGCPUploader(conf *livekit.GCPUpload) (uploader, error) {
 	defaultTransport := http.DefaultTransport.(*http.Transport)
 	transportClone := defaultTransport.Clone()
 
-	if conf.Proxy != nil {
-		proxyUrl, err := url.Parse(conf.Proxy.Url)
+	if conf.ProxyConfig != nil {
+		proxyUrl, err := url.Parse(conf.ProxyConfig.Url)
 		if err != nil {
 			return nil, err
 		}
 		defaultTransport.Proxy = http.ProxyURL(proxyUrl)
-		if conf.Proxy.Username != "" && conf.Proxy.Password != "" {
-			auth := fmt.Sprintf("%s:%s", conf.Proxy.Username, conf.Proxy.Password)
+		if conf.ProxyConfig.Username != "" && conf.ProxyConfig.Password != "" {
+			auth := fmt.Sprintf("%s:%s", conf.ProxyConfig.Username, conf.ProxyConfig.Password)
 			basicAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
 			defaultTransport.ProxyConnectHeader = http.Header{}
 			defaultTransport.ProxyConnectHeader.Add("Proxy-Authorization", basicAuth)
 		}
 	}
-	c, err := storage.NewClient(context.Background(), opts...)
 
+	client, err := storage.NewClient(context.Background(), opts...)
 	// restore default transport
 	http.DefaultTransport = transportClone
 	if err != nil {
-		return nil, err
+		return nil, errors.ErrUploadFailed("GCP", err)
 	}
 
-	u.client = c
+	u.client = client
 	return u, nil
 }
 
 func (u *GCPUploader) upload(localFilepath, storageFilepath string, _ types.OutputType) (string, int64, error) {
+	storageFilepath = path.Join(u.prefix, storageFilepath)
+
 	file, err := os.Open(localFilepath)
 	if err != nil {
 		return "", 0, errors.ErrUploadFailed("GCP", err)

@@ -17,7 +17,6 @@ package source
 import (
 	"context"
 	"fmt"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -26,7 +25,7 @@ import (
 	"github.com/frostbyte73/core"
 	"github.com/go-gst/go-gst/gst"
 	"github.com/go-gst/go-gst/gst/app"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 	"go.uber.org/atomic"
 
 	"github.com/livekit/egress/pkg/config"
@@ -55,7 +54,7 @@ type SDKSource struct {
 	mu                   sync.RWMutex
 	initialized          core.Fuse
 	filenameReplacements map[string]string
-	errors               chan error
+	errors               chan *subscriptionInfo
 
 	writers map[string]*sdk.AppWriter
 	subLock sync.RWMutex
@@ -64,6 +63,11 @@ type SDKSource struct {
 
 	startRecording chan struct{}
 	endRecording   chan struct{}
+}
+
+type subscriptionInfo struct {
+	trackID string
+	err     error
 }
 
 func NewSDKSource(ctx context.Context, p *config.PipelineConfig, callbacks *gstreamer.Callbacks) (*SDKSource, error) {
@@ -78,7 +82,7 @@ func NewSDKSource(ctx context.Context, p *config.PipelineConfig, callbacks *gstr
 			close(startRecording)
 		}),
 		filenameReplacements: make(map[string]string),
-		errors:               make(chan error, 2),
+		errors:               make(chan *subscriptionInfo, 2),
 		writers:              make(map[string]*sdk.AppWriter),
 		startRecording:       startRecording,
 		endRecording:         make(chan struct{}),
@@ -225,9 +229,9 @@ func (s *SDKSource) awaitParticipantTracks(identity string) (uint32, uint32, err
 	done := false
 	for !done {
 		select {
-		case err = <-s.errors:
-			if err != nil {
-				return 0, 0, err
+		case sub := <-s.errors:
+			if sub.err != nil {
+				return 0, 0, sub.err
 			}
 			subscribed++
 			if subscribed == expected {
@@ -245,9 +249,9 @@ func (s *SDKSource) awaitParticipantTracks(identity string) (uint32, uint32, err
 	for {
 		select {
 		// check errors from any tracks published in the meantime
-		case err = <-s.errors:
-			if err != nil {
-				return 0, 0, err
+		case sub := <-s.errors:
+			if sub.err != nil {
+				return 0, 0, sub.err
 			}
 		default:
 			// get dimensions after subscribing so that track info exists
@@ -290,12 +294,15 @@ func (s *SDKSource) awaitTracks(expecting map[string]struct{}) (uint32, uint32, 
 
 	for i := 0; i < trackCount; i++ {
 		select {
-		case err = <-s.errors:
-			if err != nil {
-				return 0, 0, err
+		case sub := <-s.errors:
+			if sub.err != nil {
+				return 0, 0, sub.err
 			}
+			delete(expecting, sub.trackID)
 		case <-deadline:
-			return 0, 0, errors.ErrSubscriptionFailed
+			for trackID := range expecting {
+				return 0, 0, errors.ErrTrackNotFound(trackID)
+			}
 		}
 	}
 
@@ -325,6 +332,12 @@ func (s *SDKSource) subscribeToTracks(expecting map[string]struct{}, deadline <-
 				for _, track := range p.TrackPublications() {
 					trackID := track.SID()
 					if _, ok := expecting[trackID]; ok {
+						if trackID == s.AudioTrackID && track.Kind() == lksdk.TrackKindVideo {
+							return nil, errors.ErrInvalidInput("audio_track_id")
+						} else if trackID == s.VideoTrackID && track.Kind() == lksdk.TrackKindAudio {
+							return nil, errors.ErrInvalidInput("video_track_id")
+						}
+
 						if err := s.subscribe(track); err != nil {
 							return nil, err
 						}
@@ -375,7 +388,10 @@ func (s *SDKSource) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.Remo
 				s.callbacks.OnError(onSubscribeErr)
 			}
 		} else {
-			s.errors <- onSubscribeErr
+			s.errors <- &subscriptionInfo{
+				trackID: pub.SID(),
+				err:     onSubscribeErr,
+			}
 		}
 		s.subLock.RUnlock()
 	}()
@@ -487,14 +503,7 @@ func (s *SDKSource) createWriter(
 ) (*sdk.AppWriter, error) {
 	var logFilename string
 	if s.Debug.EnableProfiling {
-		if s.Debug.ToUploadConfig() == nil {
-			if err := os.MkdirAll(path.Join(s.Debug.PathPrefix, s.Info.EgressId), 0755); err != nil {
-				return nil, err
-			}
-			logFilename = path.Join(s.Debug.PathPrefix, s.Info.EgressId, fmt.Sprintf("%s.csv", track.ID()))
-		} else {
-			logFilename = path.Join(s.TmpDir, fmt.Sprintf("%s.csv", track.ID()))
-		}
+		logFilename = path.Join(s.TmpDir, fmt.Sprintf("%s.csv", track.ID()))
 	}
 
 	src, err := gst.NewElementWithName("appsrc", fmt.Sprintf("app_%s", track.ID()))

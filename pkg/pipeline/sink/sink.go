@@ -25,7 +25,7 @@ import (
 type Sink interface {
 	Start() error
 	Close() error
-	Cleanup()
+	UploadManifest(string) (string, bool, error)
 }
 
 func CreateSinks(p *config.PipelineConfig, callbacks *gstreamer.Callbacks, monitor *stats.HandlerMonitor) (map[types.EgressType][]Sink, error) {
@@ -41,7 +41,7 @@ func CreateSinks(p *config.PipelineConfig, callbacks *gstreamer.Callbacks, monit
 		case types.EgressTypeFile:
 			o := c[0].(*config.FileConfig)
 
-			u, err := uploader.New(o.UploadConfig, p.BackupStorage, monitor)
+			u, err := uploader.New(o.StorageConfig, p.BackupConfig, monitor, p.Info)
 			if err != nil {
 				return nil, err
 			}
@@ -51,7 +51,7 @@ func CreateSinks(p *config.PipelineConfig, callbacks *gstreamer.Callbacks, monit
 		case types.EgressTypeSegments:
 			o := c[0].(*config.SegmentConfig)
 
-			u, err := uploader.New(o.UploadConfig, p.BackupStorage, monitor)
+			u, err := uploader.New(o.StorageConfig, p.BackupConfig, monitor, p.Info)
 			if err != nil {
 				return nil, err
 			}
@@ -75,7 +75,7 @@ func CreateSinks(p *config.PipelineConfig, callbacks *gstreamer.Callbacks, monit
 			for _, ci := range c {
 				o := ci.(*config.ImageConfig)
 
-				u, err := uploader.New(o.UploadConfig, p.BackupStorage, monitor)
+				u, err := uploader.New(o.StorageConfig, p.BackupConfig, monitor, p.Info)
 				if err != nil {
 					return nil, err
 				}

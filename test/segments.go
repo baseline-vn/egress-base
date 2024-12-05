@@ -17,7 +17,6 @@
 package test
 
 import (
-	"fmt"
 	"os"
 	"path"
 	"strconv"
@@ -31,10 +30,136 @@ import (
 	"github.com/livekit/egress/pkg/pipeline/sink/m3u8"
 	"github.com/livekit/egress/pkg/types"
 	"github.com/livekit/protocol/livekit"
-	"github.com/livekit/protocol/rpc"
 )
 
-func (r *Runner) runSegmentsTest(t *testing.T, req *rpc.StartEgressRequest, test *testCase) {
+func (r *Runner) testSegments(t *testing.T) {
+	if !r.should(runSegments) {
+		return
+	}
+
+	t.Run("Segments", func(t *testing.T) {
+		for _, test := range []*testCase{
+
+			// ---- Room Composite -----
+
+			{
+				name:        "RoomComposite",
+				requestType: types.RequestTypeRoomComposite,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeVP8,
+				},
+				encodingOptions: &livekit.EncodingOptions{
+					AudioCodec:   livekit.AudioCodec_AAC,
+					VideoCodec:   livekit.VideoCodec_H264_BASELINE,
+					Width:        1920,
+					Height:       1080,
+					VideoBitrate: 4500,
+				},
+				segmentOptions: &segmentOptions{
+					prefix:       "r_{room_name}_{time}",
+					playlist:     "r_{room_name}_{time}.m3u8",
+					livePlaylist: "r_live_{room_name}_{time}.m3u8",
+					suffix:       livekit.SegmentedFileSuffix_INDEX,
+				},
+			},
+			{
+				name:        "RoomComposite/AudioOnly",
+				requestType: types.RequestTypeRoomComposite,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					audioOnly:  true,
+				},
+				encodingOptions: &livekit.EncodingOptions{
+					AudioCodec: livekit.AudioCodec_AAC,
+				},
+				segmentOptions: &segmentOptions{
+					prefix:   "r_{room_name}_audio_{time}",
+					playlist: "r_{room_name}_audio_{time}.m3u8",
+					suffix:   livekit.SegmentedFileSuffix_TIMESTAMP,
+				},
+			},
+
+			// ---------- Web ----------
+
+			{
+				name:        "Web",
+				requestType: types.RequestTypeWeb,
+				segmentOptions: &segmentOptions{
+					prefix:   "web_{time}",
+					playlist: "web_{time}.m3u8",
+				},
+			},
+
+			// ------ Participant ------
+
+			{
+				name:        "ParticipantComposite/VP8",
+				requestType: types.RequestTypeParticipant,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeVP8,
+					// videoDelay:     time.Second * 10,
+					// videoUnpublish: time.Second * 20,
+				},
+				segmentOptions: &segmentOptions{
+					prefix:   "participant_{publisher_identity}_vp8_{time}",
+					playlist: "participant_{publisher_identity}_vp8_{time}.m3u8",
+				},
+			},
+			{
+				name:        "ParticipantComposite/H264",
+				requestType: types.RequestTypeParticipant,
+				publishOptions: publishOptions{
+					audioCodec:     types.MimeTypeOpus,
+					audioDelay:     time.Second * 10,
+					audioUnpublish: time.Second * 20,
+					videoCodec:     types.MimeTypeH264,
+				},
+				segmentOptions: &segmentOptions{
+					prefix:   "participant_{room_name}_h264_{time}",
+					playlist: "participant_{room_name}_h264_{time}.m3u8",
+				},
+			},
+
+			// ---- Track Composite ----
+
+			{
+				name:        "TrackComposite/H264",
+				requestType: types.RequestTypeTrackComposite,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeH264,
+				},
+				segmentOptions: &segmentOptions{
+					prefix:       "tcs_{room_name}_h264_{time}",
+					playlist:     "tcs_{room_name}_h264_{time}.m3u8",
+					livePlaylist: "tcs_live_{room_name}_h264_{time}.m3u8",
+				},
+			},
+			{
+				name:        "TrackComposite/AudioOnly",
+				requestType: types.RequestTypeTrackComposite,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					audioOnly:  true,
+				},
+				segmentOptions: &segmentOptions{
+					prefix:   "tcs_{room_name}_audio_{time}",
+					playlist: "tcs_{room_name}_audio_{time}.m3u8",
+				},
+			},
+		} {
+			if !r.run(t, test, r.runSegmentsTest) {
+				return
+			}
+		}
+	})
+}
+
+func (r *Runner) runSegmentsTest(t *testing.T, test *testCase) {
+	req := r.build(test)
+
 	egressID := r.startEgress(t, req)
 
 	time.Sleep(time.Second * 10)
@@ -50,13 +175,16 @@ func (r *Runner) runSegmentsTest(t *testing.T, req *rpc.StartEgressRequest, test
 	p, err := config.GetValidatedPipelineConfig(r.ServiceConfig, req)
 	require.NoError(t, err)
 
-	r.verifySegments(t, p, test.filenameSuffix, res, test.livePlaylist != "")
-	if !test.audioOnly {
-		require.Equal(t, test.expectVideoEncoding, p.VideoEncoding)
-	}
+	require.Equal(t, !test.audioOnly, p.VideoEncoding)
+
+	r.verifySegments(t, p, test.segmentOptions.suffix, res, test.livePlaylist != "")
 }
 
-func (r *Runner) verifySegments(t *testing.T, p *config.PipelineConfig, filenameSuffix livekit.SegmentedFileSuffix, res *livekit.EgressInfo, enableLivePlaylist bool) {
+func (r *Runner) verifySegments(
+	t *testing.T, p *config.PipelineConfig,
+	filenameSuffix livekit.SegmentedFileSuffix,
+	res *livekit.EgressInfo, enableLivePlaylist bool,
+) {
 	// egress info
 	require.Equal(t, res.Error == "", res.Status != livekit.EgressStatus_EGRESS_FAILED)
 	require.NotZero(t, res.StartedAt)
@@ -70,21 +198,18 @@ func (r *Runner) verifySegments(t *testing.T, p *config.PipelineConfig, filename
 	require.Greater(t, segments.Duration, int64(0))
 
 	r.verifySegmentOutput(t, p, filenameSuffix, segments.PlaylistName, segments.PlaylistLocation, int(segments.SegmentCount), res, m3u8.PlaylistTypeEvent)
-	r.verifyManifest(t, p, segments.PlaylistName)
 	if enableLivePlaylist {
 		r.verifySegmentOutput(t, p, filenameSuffix, segments.LivePlaylistName, segments.LivePlaylistLocation, 5, res, m3u8.PlaylistTypeLive)
 	}
 }
 
-func (r *Runner) verifyManifest(t *testing.T, p *config.PipelineConfig, plName string) {
-	localPlaylistPath := path.Join(r.FilePrefix, path.Base(plName))
+func (r *Runner) verifySegmentOutput(
+	t *testing.T, p *config.PipelineConfig,
+	filenameSuffix livekit.SegmentedFileSuffix,
+	plName string, plLocation string, segmentCount int,
+	res *livekit.EgressInfo, plType m3u8.PlaylistType,
+) {
 
-	if uploadConfig := p.GetSegmentConfig().UploadConfig; uploadConfig != nil {
-		download(t, uploadConfig, localPlaylistPath+".json", plName+".json")
-	}
-}
-
-func (r *Runner) verifySegmentOutput(t *testing.T, p *config.PipelineConfig, filenameSuffix livekit.SegmentedFileSuffix, plName string, plLocation string, segmentCount int, res *livekit.EgressInfo, plType m3u8.PlaylistType) {
 	require.NotEmpty(t, plName)
 	require.NotEmpty(t, plLocation)
 
@@ -92,16 +217,19 @@ func (r *Runner) verifySegmentOutput(t *testing.T, p *config.PipelineConfig, fil
 	localPlaylistPath := plName
 
 	// download from cloud storage
-	if uploadConfig := p.GetSegmentConfig().UploadConfig; uploadConfig != nil {
-		localPlaylistPath = path.Join(r.FilePrefix, path.Base(storedPlaylistPath))
-		download(t, uploadConfig, localPlaylistPath, storedPlaylistPath)
-		if plType == m3u8.PlaylistTypeEvent {
-			// Only download segments once
-			base := storedPlaylistPath[:len(storedPlaylistPath)-5]
-			for i := 0; i < segmentCount; i++ {
-				cloudPath := fmt.Sprintf("%s_%05d.ts", base, i)
-				localPath := path.Join(r.FilePrefix, path.Base(cloudPath))
-				download(t, uploadConfig, localPath, cloudPath)
+	localPlaylistPath = path.Join(r.FilePrefix, path.Base(storedPlaylistPath))
+	download(t, p.GetSegmentConfig().StorageConfig, localPlaylistPath, storedPlaylistPath, true)
+
+	if plType == m3u8.PlaylistTypeEvent {
+		manifestLocal := path.Join(path.Dir(localPlaylistPath), res.EgressId+".json")
+		manifestStorage := path.Join(path.Dir(storedPlaylistPath), res.EgressId+".json")
+		manifest := loadManifest(t, p.GetSegmentConfig().StorageConfig, manifestLocal, manifestStorage)
+
+		for _, playlist := range manifest.Playlists {
+			require.Equal(t, segmentCount, len(playlist.Segments))
+			for _, segment := range playlist.Segments {
+				localPath := path.Join(r.FilePrefix, path.Base(segment.Filename))
+				download(t, p.GetSegmentConfig().StorageConfig, localPath, segment.Filename, true)
 			}
 		}
 	}
@@ -192,7 +320,7 @@ func readPlaylist(filename string) (*Playlist, error) {
 		Segments:       make([]*Segment, 0),
 	}
 
-	for i := segmentLineStart; i < len(lines)-3; i += 3 {
+	for i = segmentLineStart; i < len(lines)-3; i += 3 {
 		startTime, _ := time.Parse("2006-01-02T15:04:05.999Z07:00", strings.SplitN(lines[i], ":", 2)[1])
 		durStr := strings.Split(lines[i+1], ":")[1]
 		durStr = durStr[:len(durStr)-1] // remove trailing comma

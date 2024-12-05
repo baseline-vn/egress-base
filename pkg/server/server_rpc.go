@@ -73,19 +73,28 @@ func (s *Server) StartEgress(ctx context.Context, req *rpc.StartEgressRequest) (
 		"request", p.Info.Request,
 	)
 
-	errChan := s.ioClient.CreateEgress(ctx, (*livekit.EgressInfo)(p.Info))
-	s.launchProcess(req, (*livekit.EgressInfo)(p.Info))
-	if err = <-errChan; err != nil {
-		s.AbortProcess(req.EgressId, err)
-		s.monitor.EgressAborted(req)
-		s.activeRequests.Dec()
-		return nil, err
+	errChan := s.ioClient.CreateEgress(ctx, p.Info)
+	launchErr := s.launchProcess(req, p.Info)
+	createErr := <-errChan
+
+	if launchErr != nil {
+		if createErr == nil {
+			// send failed update if it was saved to db
+			s.processEnded(req, p.Info, launchErr)
+		}
+		return nil, launchErr
+	} else if createErr != nil {
+		// launched but failed to save - abort and return error
+		p.Info.Error = createErr.Error()
+		p.Info.ErrorCode = int32(http.StatusInternalServerError)
+		s.AbortProcess(req.EgressId, createErr)
+		return nil, createErr
 	}
 
-	return (*livekit.EgressInfo)(p.Info), nil
+	return p.Info, nil
 }
 
-func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.EgressInfo) {
+func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.EgressInfo) error {
 	_, span := tracer.Start(context.Background(), "Service.launchProcess")
 	defer span.End()
 
@@ -95,23 +104,21 @@ func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.Egress
 	p := &config.PipelineConfig{
 		BaseConfig: s.conf.BaseConfig,
 		HandlerID:  handlerID,
-		TmpDir:     path.Join(os.TempDir(), handlerID),
+		TmpDir:     path.Join(config.TmpDir, req.EgressId),
 	}
 
 	confString, err := yaml.Marshal(p)
 	if err != nil {
 		span.RecordError(err)
 		logger.Errorw("could not marshal config", err)
-		s.processEnded(req, info, err)
-		return
+		return err
 	}
 
 	reqString, err := protojson.Marshal(req)
 	if err != nil {
 		span.RecordError(err)
 		logger.Errorw("could not marshal request", err)
-		s.processEnded(req, info, err)
-		return
+		return err
 	}
 
 	cmd := exec.Command("egress",
@@ -124,14 +131,15 @@ func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.Egress
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-	if err = s.Launch(context.Background(), handlerID, req, info, cmd, p.TmpDir); err != nil {
-		s.processEnded(req, info, err)
+	if err = s.Launch(context.Background(), handlerID, req, info, cmd); err != nil {
+		return err
 	} else {
 		s.monitor.UpdatePID(info.EgressId, cmd.Process.Pid)
 		go func() {
 			err = cmd.Wait()
 			s.processEnded(req, info, err)
 		}()
+		return nil
 	}
 }
 
@@ -145,8 +153,8 @@ func (s *Server) processEnded(req *rpc.StartEgressRequest, info *livekit.EgressI
 		info.Error = "internal error"
 		info.ErrorCode = int32(http.StatusInternalServerError)
 		_ = s.ioClient.UpdateEgress(context.Background(), info)
-		logger.Errorw("process failed, shutting down", err)
-		s.Shutdown(false, false)
+
+		logger.Errorw("process failed", err)
 	}
 
 	avgCPU, maxCPU := s.monitor.EgressEnded(req)

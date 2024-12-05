@@ -96,13 +96,13 @@ func NewServer(conf *config.ServiceConfig, bus psrpc.MessageBus, ioClient info.I
 		}()
 	}
 
-	tmpDir := path.Join(os.TempDir(), s.conf.NodeID)
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+	ipcSvcDir := path.Join(config.TmpDir, s.conf.NodeID)
+	if err = os.MkdirAll(ipcSvcDir, 0755); err != nil {
 		return nil, err
 	}
 
 	ipc.RegisterEgressServiceServer(s.ipcServiceServer, s)
-	if err := ipc.StartServiceListener(s.ipcServiceServer, tmpDir); err != nil {
+	if err := ipc.StartServiceListener(s.ipcServiceServer, ipcSvcDir); err != nil {
 		return nil, err
 	}
 
@@ -154,13 +154,11 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) Status() ([]byte, error) {
-	info := map[string]interface{}{
+	status := map[string]interface{}{
 		"CpuLoad": s.monitor.GetAvailableCPU(),
 	}
-
-	s.GetStatus(info)
-
-	return json.Marshal(info)
+	s.GetStatus(status)
+	return json.Marshal(status)
 }
 
 func (s *Server) IsIdle() bool {
@@ -168,7 +166,7 @@ func (s *Server) IsIdle() bool {
 }
 
 func (s *Server) IsDisabled() bool {
-	return s.shutdown.IsBroken()
+	return s.shutdown.IsBroken() || !s.ioClient.IsHealthy()
 }
 
 func (s *Server) IsTerminating() bool {

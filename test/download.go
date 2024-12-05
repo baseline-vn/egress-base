@@ -18,6 +18,7 @@ package test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
@@ -26,50 +27,71 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-storage-blob-go/azblob"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsConfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/googleapis/gax-go/v2"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/option"
 
 	"github.com/livekit/egress/pkg/config"
-	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 )
 
-func download(t *testing.T, uploadParams interface{}, localFilepath, storageFilepath string) {
-	switch u := uploadParams.(type) {
-	case *config.EgressS3Upload:
-		logger.Debugw("s3 download", "localFilepath", localFilepath, "storageFilepath", storageFilepath)
-		downloadS3(t, u, localFilepath, storageFilepath)
+func loadManifest(t *testing.T, c *config.StorageConfig, localFilepath, storageFilepath string) *config.Manifest {
+	download(t, c, localFilepath, storageFilepath, false)
+	defer os.Remove(localFilepath)
 
-	case *livekit.GCPUpload:
-		logger.Debugw("gcp download", "localFilepath", localFilepath, "storageFilepath", storageFilepath)
-		downloadGCP(t, u, localFilepath, storageFilepath)
+	b, err := os.ReadFile(localFilepath)
+	require.NoError(t, err)
 
-	case *livekit.AzureBlobUpload:
-		logger.Debugw("azure download", "localFilepath", localFilepath, "storageFilepath", storageFilepath)
-		downloadAzure(t, u, localFilepath, storageFilepath)
+	m := &config.Manifest{}
+	err = json.Unmarshal(b, m)
+	require.NoError(t, err)
+
+	return m
+}
+
+func download(t *testing.T, c *config.StorageConfig, localFilepath, storageFilepath string, delete bool) {
+	if c != nil {
+		if c.S3 != nil {
+			logger.Debugw("s3 download", "localFilepath", localFilepath, "storageFilepath", storageFilepath)
+			downloadS3(t, c.S3, localFilepath, storageFilepath, delete)
+		} else if c.GCP != nil {
+			logger.Debugw("gcp download", "localFilepath", localFilepath, "storageFilepath", storageFilepath)
+			downloadGCP(t, c.GCP, localFilepath, storageFilepath, delete)
+		} else if c.Azure != nil {
+			logger.Debugw("azure download", "localFilepath", localFilepath, "storageFilepath", storageFilepath)
+			downloadAzure(t, c.Azure, localFilepath, storageFilepath, delete)
+		}
 	}
 }
 
-func downloadS3(t *testing.T, conf *config.EgressS3Upload, localFilepath, storageFilepath string) {
-	sess, err := session.NewSession(&aws.Config{
-		Credentials: credentials.NewStaticCredentials(conf.AccessKey, conf.Secret, conf.SessionToken),
-		Endpoint:    aws.String(conf.Endpoint),
-		Region:      aws.String(conf.Region),
-		MaxRetries:  aws.Int(maxRetries),
-	})
-	require.NoError(t, err)
-
+func downloadS3(t *testing.T, conf *config.S3Config, localFilepath, storageFilepath string, delete bool) {
 	file, err := os.Create(localFilepath)
 	require.NoError(t, err)
 	defer file.Close()
 
-	_, err = s3manager.NewDownloader(sess).Download(file,
+	awsConf, err := awsConfig.LoadDefaultConfig(context.Background(), func(o *awsConfig.LoadOptions) error {
+		o.Region = conf.Region
+		o.Credentials = credentials.StaticCredentialsProvider{
+			Value: aws.Credentials{
+				AccessKeyID:     conf.AccessKey,
+				SecretAccessKey: conf.Secret,
+				SessionToken:    conf.SessionToken,
+			},
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	s3Client := s3.NewFromConfig(awsConf)
+
+	_, err = manager.NewDownloader(s3Client).Download(
+		context.Background(),
+		file,
 		&s3.GetObjectInput{
 			Bucket: aws.String(conf.Bucket),
 			Key:    aws.String(storageFilepath),
@@ -77,14 +99,16 @@ func downloadS3(t *testing.T, conf *config.EgressS3Upload, localFilepath, storag
 	)
 	require.NoError(t, err)
 
-	_, err = s3.New(sess).DeleteObject(&s3.DeleteObjectInput{
-		Bucket: aws.String(conf.Bucket),
-		Key:    aws.String(storageFilepath),
-	})
-	require.NoError(t, err)
+	if delete {
+		_, err = s3Client.DeleteObject(context.Background(), &s3.DeleteObjectInput{
+			Bucket: aws.String(conf.Bucket),
+			Key:    aws.String(storageFilepath),
+		})
+		require.NoError(t, err)
+	}
 }
 
-func downloadAzure(t *testing.T, conf *livekit.AzureBlobUpload, localFilepath, storageFilepath string) {
+func downloadAzure(t *testing.T, conf *config.AzureConfig, localFilepath, storageFilepath string, delete bool) {
 	credential, err := azblob.NewSharedKeyCredential(
 		conf.AccountName,
 		conf.AccountKey,
@@ -118,17 +142,19 @@ func downloadAzure(t *testing.T, conf *livekit.AzureBlobUpload, localFilepath, s
 	})
 	require.NoError(t, err)
 
-	_, err = blobURL.Delete(context.Background(), azblob.DeleteSnapshotsOptionNone, azblob.BlobAccessConditions{})
-	require.NoError(t, err)
+	if delete {
+		_, err = blobURL.Delete(context.Background(), azblob.DeleteSnapshotsOptionNone, azblob.BlobAccessConditions{})
+		require.NoError(t, err)
+	}
 }
 
-func downloadGCP(t *testing.T, conf *livekit.GCPUpload, localFilepath, storageFilepath string) {
+func downloadGCP(t *testing.T, conf *config.GCPConfig, localFilepath, storageFilepath string, delete bool) {
 	ctx := context.Background()
 	var client *storage.Client
 
 	var err error
-	if conf.Credentials != "" {
-		client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(conf.Credentials)))
+	if conf.CredentialsJSON != "" {
+		client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(conf.CredentialsJSON)))
 	} else {
 		client, err = storage.NewClient(ctx)
 	}
@@ -154,6 +180,8 @@ func downloadGCP(t *testing.T, conf *livekit.GCPUpload, localFilepath, storageFi
 	_ = rc.Close()
 	require.NoError(t, err)
 
-	err = client.Bucket(conf.Bucket).Object(storageFilepath).Delete(context.Background())
-	require.NoError(t, err)
+	if delete {
+		err = client.Bucket(conf.Bucket).Object(storageFilepath).Delete(context.Background())
+		require.NoError(t, err)
+	}
 }

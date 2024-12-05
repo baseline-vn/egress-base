@@ -19,9 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
-	"github.com/go-gst/go-glib/glib"
 	"github.com/go-gst/go-gst/gst"
 
 	"github.com/livekit/egress/pkg/config"
@@ -532,7 +530,7 @@ func (b *VideoBin) addEncoder() error {
 	}
 
 	switch b.conf.VideoOutCodec {
-    // we only encode h264, the rest are too slow
+	// we only encode h264, the rest are too slow
 	case types.MimeTypeH264:
 		x264Enc, err := gst.NewElement("x264enc")
 		if err != nil {
@@ -553,12 +551,11 @@ func (b *VideoBin) addEncoder() error {
 			return errors.ErrGstPipelineError(err)
 		}
 
+		var options []string
 		bufCapacity := uint(2000) // 2s
 		if b.conf.GetSegmentConfig() != nil {
 			// avoid key frames other than at segments boundaries as splitmuxsink can become inconsistent otherwise
-			if err = x264Enc.SetProperty("option-string", "scenecut=0"); err != nil {
-				return errors.ErrGstPipelineError(err)
-			}
+			options = append(options, "scenecut=0")
 			bufCapacity = uint(time.Duration(b.conf.GetSegmentConfig().SegmentDuration) * (time.Second / time.Millisecond))
 		}
 		if bufCapacity > 10000 {
@@ -568,11 +565,19 @@ func (b *VideoBin) addEncoder() error {
 		if err = x264Enc.SetProperty("vbv-buf-capacity", bufCapacity); err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
-		if b.conf.GetStreamConfig() != nil {
-			x264Enc.SetArg("pass", "cbr")
-		}
+
 		if err = x264Enc.SetProperty("bitrate", uint(b.conf.VideoBitrate)); err != nil {
 			return errors.ErrGstPipelineError(err)
+		}
+
+		if sc := b.conf.GetStreamConfig(); sc != nil && sc.OutputType == types.OutputTypeRTMP {
+			options = append(options, "nal-hrd=cbr")
+		}
+		if len(options) > 0 {
+			optionString := strings.Join(options, ":")
+			if err = x264Enc.SetProperty("option-string", optionString); err != nil {
+				return errors.ErrGstPipelineError(err)
+			}
 		}
 
 		caps, err := gst.NewElement("capsfilter")
@@ -764,7 +769,6 @@ func (b *VideoBin) setSelectorPad(name string) error {
 	return b.setSelectorPadLocked(name)
 }
 
-// TODO: go-gst should accept objects directly and handle conversion to C
 func (b *VideoBin) setSelectorPadLocked(name string) error {
 	pad := b.pads[name]
 
@@ -778,16 +782,7 @@ func (b *VideoBin) setSelectorPadLocked(name string) error {
 		return gst.PadProbeRemove
 	})
 
-	pt, err := b.selector.GetPropertyType("active-pad")
-	if err != nil {
-		return errors.ErrGstPipelineError(err)
-	}
-	val, err := glib.ValueInit(pt)
-	if err != nil {
-		return errors.ErrGstPipelineError(err)
-	}
-	val.SetInstance(unsafe.Pointer(pad.Instance()))
-	if err = b.selector.SetPropertyValue("active-pad", val); err != nil {
+	if err := b.selector.SetProperty("active-pad", pad); err != nil {
 		return errors.ErrGstPipelineError(err)
 	}
 

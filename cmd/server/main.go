@@ -111,7 +111,7 @@ func runService(c *cli.Context) error {
 	}
 
 	bus := psrpc.NewRedisMessageBus(rc)
-	ioClient, err := info.NewIOClient(bus)
+	ioClient, err := info.NewIOClient(&conf.BaseConfig, bus)
 	if err != nil {
 		return err
 	}
@@ -180,6 +180,7 @@ func runHandler(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(conf.TmpDir)
 	_ = os.Setenv("TMPDIR", conf.TmpDir)
 
 	rc, err := lkredis.GetRedisClient(conf.Redis)

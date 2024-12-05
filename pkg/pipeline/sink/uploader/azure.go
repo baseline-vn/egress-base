@@ -19,27 +19,39 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 
 	"github.com/Azure/azure-storage-blob-go/azblob"
 
+	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/types"
-	"github.com/livekit/protocol/livekit"
 )
 
 type AzureUploader struct {
-	conf      *livekit.AzureBlobUpload
-	container string
+	conf                 *config.AzureConfig
+	prefix               string
+	container            string
+	generatePresignedUrl bool
 }
 
-func newAzureUploader(conf *livekit.AzureBlobUpload) (uploader, error) {
+func newAzureUploader(c *config.StorageConfig) (uploader, error) {
+	if c.GeneratePresignedUrl {
+		return nil, errors.ErrUploadFailed("Azure", fmt.Errorf("presigned URLs not supported"))
+	}
+
+	conf := c.Azure
 	return &AzureUploader{
-		conf:      conf,
-		container: fmt.Sprintf("https://%s.blob.core.windows.net/%s", conf.AccountName, conf.ContainerName),
+		conf:                 conf,
+		prefix:               c.PathPrefix,
+		generatePresignedUrl: c.GeneratePresignedUrl,
+		container:            fmt.Sprintf("https://%s.blob.core.windows.net/%s", conf.AccountName, conf.ContainerName),
 	}, nil
 }
 
 func (u *AzureUploader) upload(localFilepath, storageFilepath string, outputType types.OutputType) (string, int64, error) {
+	storageFilepath = path.Join(u.prefix, storageFilepath)
+
 	credential, err := azblob.NewSharedKeyCredential(
 		u.conf.AccountName,
 		u.conf.AccountKey,

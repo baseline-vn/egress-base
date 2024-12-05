@@ -25,11 +25,61 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/livekit/egress/pkg/config"
+	"github.com/livekit/egress/pkg/types"
 	"github.com/livekit/protocol/livekit"
-	"github.com/livekit/protocol/rpc"
 )
 
-func (r *Runner) runImagesTest(t *testing.T, req *rpc.StartEgressRequest, test *testCase) {
+func (r *Runner) testImages(t *testing.T) {
+	if !r.should(runImages) {
+		return
+	}
+
+	t.Run("Images", func(t *testing.T) {
+		for _, test := range []*testCase{
+
+			// ---- Room Composite -----
+
+			{
+				name:        "RoomComposite",
+				requestType: types.RequestTypeRoomComposite,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeH264,
+				},
+				encodingOptions: &livekit.EncodingOptions{
+					Width:  640,
+					Height: 360,
+				},
+				imageOptions: &imageOptions{
+					prefix: "r_{room_name}_{time}",
+					suffix: livekit.ImageFileSuffix_IMAGE_SUFFIX_TIMESTAMP,
+				},
+			},
+
+			// ---- Track Composite ----
+
+			{
+				name:        "TrackComposite/H264",
+				requestType: types.RequestTypeTrackComposite,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeH264,
+				},
+				imageOptions: &imageOptions{
+					prefix: "tc_{publisher_identity}_h264",
+				},
+			},
+		} {
+			if !r.run(t, test, r.runImagesTest) {
+				return
+			}
+		}
+	})
+}
+
+func (r *Runner) runImagesTest(t *testing.T, test *testCase) {
+	req := r.build(test)
+
 	egressID := r.startEgress(t, req)
 
 	time.Sleep(time.Second * 10)
@@ -61,11 +111,9 @@ func (r *Runner) verifyImages(t *testing.T, p *config.PipelineConfig, res *livek
 	require.Greater(t, images.ImageCount, int64(0))
 
 	imageConfig := p.GetImageConfigs()[0]
-	if uploadConfig := imageConfig.UploadConfig; uploadConfig != nil {
-		for i := range images.ImageCount {
-			storagePath := fmt.Sprintf("%s_%05d%s", images.FilenamePrefix, i, imageConfig.ImageExtension)
-			localPath := path.Join(r.FilePrefix, path.Base(storagePath))
-			download(t, uploadConfig, localPath, storagePath)
-		}
+	for i := range images.ImageCount {
+		storagePath := fmt.Sprintf("%s_%05d%s", images.FilenamePrefix, i, imageConfig.ImageExtension)
+		localPath := path.Join(r.FilePrefix, path.Base(storagePath))
+		download(t, imageConfig.StorageConfig, localPath, storagePath, true)
 	}
 }

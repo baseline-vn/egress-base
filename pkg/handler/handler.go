@@ -17,7 +17,6 @@ package handler
 import (
 	"context"
 	"path"
-	"strings"
 
 	"github.com/frostbyte73/core"
 	"google.golang.org/grpc"
@@ -45,7 +44,7 @@ type Handler struct {
 }
 
 func NewHandler(conf *config.PipelineConfig, bus psrpc.MessageBus) (*Handler, error) {
-	ipcClient, err := ipc.NewServiceClient(path.Join(conf.TmpDir[:strings.LastIndex(conf.TmpDir, "/")], conf.NodeID))
+	ipcClient, err := ipc.NewServiceClient(path.Join(config.TmpDir, conf.NodeID))
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +56,7 @@ func NewHandler(conf *config.PipelineConfig, bus psrpc.MessageBus) (*Handler, er
 	}
 
 	ipc.RegisterEgressHandlerServer(h.ipcHandlerServer, h)
-	if err = ipc.StartHandlerListener(h.ipcHandlerServer, conf.TmpDir); err != nil {
+	if err = ipc.StartHandlerListener(h.ipcHandlerServer, path.Join(config.TmpDir, conf.HandlerID)); err != nil {
 		return nil, err
 	}
 
@@ -96,7 +95,7 @@ func (h *Handler) Run() {
 	h.initialized.Break()
 	if err != nil {
 		h.conf.Info.SetFailed(err)
-		_, _ = h.ipcServiceClient.HandlerUpdate(context.Background(), (*livekit.EgressInfo)(h.conf.Info))
+		_, _ = h.ipcServiceClient.HandlerUpdate(context.Background(), h.conf.Info)
 		return
 	}
 
@@ -110,7 +109,7 @@ func (h *Handler) Run() {
 	_, _ = h.ipcServiceClient.HandlerFinished(ctx, &ipc.HandlerFinishedRequest{
 		EgressId: h.conf.Info.EgressId,
 		Metrics:  m,
-		Info:     (*livekit.EgressInfo)(res),
+		Info:     res,
 	})
 }
 
@@ -119,5 +118,5 @@ func (h *Handler) Kill() {
 	if h.controller == nil {
 		return
 	}
-	h.controller.SendEOS(context.Background(), "handler killed")
+	h.controller.SendEOS(context.Background(), livekit.EndReasonKilled)
 }

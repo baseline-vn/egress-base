@@ -17,6 +17,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -26,8 +27,6 @@ import (
 )
 
 const (
-	TmpDir = "/home/egress/tmp"
-
 	roomCompositeCpuCost      = 4
 	audioRoomCompositeCpuCost = 1
 	webCpuCost                = 4
@@ -37,9 +36,13 @@ const (
 	trackCpuCost              = 0.5
 	maxCpuUtilization         = 0.8
 	maxConcurrentWeb          = 18
+	maxUploadQueue            = 60
 
 	defaultTemplatePort         = 7980
 	defaultTemplateBaseTemplate = "http://localhost:%d/"
+
+	defaultIOCreateTimeout = time.Second * 15
+	defaultIOUpdateTimeout = time.Second * 30
 )
 
 type ServiceConfig struct {
@@ -75,7 +78,6 @@ func NewServiceConfig(confString string) (*ServiceConfig, error) {
 			ApiSecret: os.Getenv("LIVEKIT_API_SECRET"),
 			WsUrl:     os.Getenv("LIVEKIT_WS_URL"),
 		},
-		TemplatePort:  defaultTemplatePort,
 		CPUCostConfig: &CPUCostConfig{},
 	}
 	if confString != "" {
@@ -86,43 +88,59 @@ func NewServiceConfig(confString string) (*ServiceConfig, error) {
 
 	// always create a new node ID
 	conf.NodeID = utils.NewGuid("NE_")
-
-	// Setting CPU costs from config. Ensure that CPU costs are positive
-	if conf.RoomCompositeCpuCost <= 0 {
-		conf.RoomCompositeCpuCost = roomCompositeCpuCost
-	}
-	if conf.AudioRoomCompositeCpuCost <= 0 {
-		conf.AudioRoomCompositeCpuCost = audioRoomCompositeCpuCost
-	}
-	if conf.WebCpuCost <= 0 {
-		conf.WebCpuCost = webCpuCost
-	}
-	if conf.AudioWebCpuCost <= 0 {
-		conf.AudioWebCpuCost = audioWebCpuCost
-	}
-	if conf.ParticipantCpuCost <= 0 {
-		conf.ParticipantCpuCost = participantCpuCost
-	}
-	if conf.TrackCompositeCpuCost <= 0 {
-		conf.TrackCompositeCpuCost = trackCompositeCpuCost
-	}
-	if conf.TrackCpuCost <= 0 {
-		conf.TrackCpuCost = trackCpuCost
-	}
-	if conf.MaxCpuUtilization <= 0 || conf.MaxCpuUtilization > 1 {
-		conf.MaxCpuUtilization = maxCpuUtilization
-	}
-	if conf.MaxConcurrentWeb <= 0 {
-		conf.MaxConcurrentWeb = maxConcurrentWeb
-	}
-
-	if conf.TemplateBase == "" {
-		conf.TemplateBase = fmt.Sprintf(defaultTemplateBaseTemplate, conf.TemplatePort)
-	}
+	conf.InitDefaults()
 
 	if err := conf.initLogger("nodeID", conf.NodeID, "clusterID", conf.ClusterID); err != nil {
 		return nil, err
 	}
 
 	return conf, nil
+}
+
+func (c *ServiceConfig) InitDefaults() {
+	if c.TemplatePort == 0 {
+		c.TemplatePort = defaultTemplatePort
+	}
+	if c.TemplateBase == "" {
+		c.TemplateBase = fmt.Sprintf(defaultTemplateBaseTemplate, c.TemplatePort)
+	}
+
+	if c.IOCreateTimeout == 0 {
+		c.IOCreateTimeout = defaultIOCreateTimeout
+	}
+	if c.IOUpdateTimeout == 0 {
+		c.IOUpdateTimeout = defaultIOUpdateTimeout
+	}
+
+	// Setting CPU costs from config. Ensure that CPU costs are positive
+	if c.RoomCompositeCpuCost <= 0 {
+		c.RoomCompositeCpuCost = roomCompositeCpuCost
+	}
+	if c.AudioRoomCompositeCpuCost <= 0 {
+		c.AudioRoomCompositeCpuCost = audioRoomCompositeCpuCost
+	}
+	if c.WebCpuCost <= 0 {
+		c.WebCpuCost = webCpuCost
+	}
+	if c.AudioWebCpuCost <= 0 {
+		c.AudioWebCpuCost = audioWebCpuCost
+	}
+	if c.ParticipantCpuCost <= 0 {
+		c.ParticipantCpuCost = participantCpuCost
+	}
+	if c.TrackCompositeCpuCost <= 0 {
+		c.TrackCompositeCpuCost = trackCompositeCpuCost
+	}
+	if c.TrackCpuCost <= 0 {
+		c.TrackCpuCost = trackCpuCost
+	}
+	if c.MaxCpuUtilization <= 0 || c.MaxCpuUtilization > 1 {
+		c.MaxCpuUtilization = maxCpuUtilization
+	}
+	if c.MaxConcurrentWeb <= 0 {
+		c.MaxConcurrentWeb = maxConcurrentWeb
+	}
+	if c.MaxUploadQueue <= 0 {
+		c.MaxUploadQueue = maxUploadQueue
+	}
 }

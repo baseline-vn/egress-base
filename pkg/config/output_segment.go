@@ -39,7 +39,7 @@ type SegmentConfig struct {
 	SegmentDuration      int
 
 	DisableManifest bool
-	UploadConfig    UploadConfig
+	StorageConfig   *StorageConfig
 }
 
 func (p *PipelineConfig) GetSegmentConfig() *SegmentConfig {
@@ -52,6 +52,11 @@ func (p *PipelineConfig) GetSegmentConfig() *SegmentConfig {
 
 // segments should always be added last, so we can check keyframe interval from file/stream
 func (p *PipelineConfig) getSegmentConfig(segments *livekit.SegmentedFileOutput) (*SegmentConfig, error) {
+	sc, err := p.getStorageConfig(segments)
+	if err != nil {
+		return nil, err
+	}
+
 	conf := &SegmentConfig{
 		SegmentsInfo:         &livekit.SegmentsInfo{},
 		SegmentPrefix:        clean(segments.FilenamePrefix),
@@ -60,7 +65,7 @@ func (p *PipelineConfig) getSegmentConfig(segments *livekit.SegmentedFileOutput)
 		LivePlaylistFilename: clean(segments.LivePlaylistName),
 		SegmentDuration:      int(segments.SegmentDuration),
 		DisableManifest:      segments.DisableManifest,
-		UploadConfig:         p.getUploadConfig(segments),
+		StorageConfig:        sc,
 	}
 
 	if conf.SegmentDuration == 0 {
@@ -74,8 +79,7 @@ func (p *PipelineConfig) getSegmentConfig(segments *livekit.SegmentedFileOutput)
 	}
 
 	// filename
-	err := conf.updatePrefixAndPlaylist(p)
-	if err != nil {
+	if err = conf.updatePrefixAndPlaylist(p); err != nil {
 		return nil, err
 	}
 
@@ -105,7 +109,7 @@ func (o *SegmentConfig) updatePrefixAndPlaylist(p *PipelineConfig) error {
 
 	playlistDir, playlistName := path.Split(o.PlaylistFilename)
 	livePlaylistDir, livePlaylistName := path.Split(o.LivePlaylistFilename)
-	fileDir, filePrefix := path.Split(o.SegmentPrefix)
+	segmentDir, segmentPrefix := path.Split(o.SegmentPrefix)
 
 	// force live playlist to be in the same directory as the main playlist
 	if livePlaylistDir != "" && livePlaylistDir != playlistDir {
@@ -116,21 +120,21 @@ func (o *SegmentConfig) updatePrefixAndPlaylist(p *PipelineConfig) error {
 	playlistName = removeKnownExtension(playlistName)
 	livePlaylistName = removeKnownExtension(livePlaylistName)
 
-	// only keep fileDir if it is a subdirectory of playlistDir
-	if fileDir != "" {
-		if playlistDir == fileDir {
-			fileDir = ""
+	// only keep segmentDir if it is a subdirectory of playlistDir
+	if segmentDir != "" {
+		if playlistDir == segmentDir {
+			segmentDir = ""
 		} else if playlistDir == "" {
-			playlistDir = fileDir
-			fileDir = ""
+			playlistDir = segmentDir
+			segmentDir = ""
 		}
 	}
 	o.StorageDir = playlistDir
 
 	// ensure playlistName
 	if playlistName == "" {
-		if filePrefix != "" {
-			playlistName = filePrefix
+		if segmentPrefix != "" {
+			playlistName = segmentPrefix
 		} else {
 			playlistName = fmt.Sprintf("%s-%s", identifier, time.Now().Format("2006-01-02T150405"))
 		}
@@ -138,8 +142,8 @@ func (o *SegmentConfig) updatePrefixAndPlaylist(p *PipelineConfig) error {
 	// live playlist disabled by default
 
 	// ensure filePrefix
-	if filePrefix == "" {
-		filePrefix = playlistName
+	if segmentPrefix == "" {
+		segmentPrefix = playlistName
 	}
 
 	// update config
@@ -148,28 +152,17 @@ func (o *SegmentConfig) updatePrefixAndPlaylist(p *PipelineConfig) error {
 	if livePlaylistName != "" {
 		o.LivePlaylistFilename = fmt.Sprintf("%s%s", livePlaylistName, ext)
 	}
-	o.SegmentPrefix = fmt.Sprintf("%s%s", fileDir, filePrefix)
+	o.SegmentPrefix = fmt.Sprintf("%s%s", segmentDir, segmentPrefix)
 
 	if o.PlaylistFilename == o.LivePlaylistFilename {
 		return errors.ErrInvalidInput("live_playlist_name cannot be identical to playlist_name")
 	}
 
-	if o.UploadConfig == nil {
-		o.LocalDir = playlistDir
-	} else {
-		// Prepend the configuration base directory and the egress Id
-		// os.ModeDir creates a directory with mode 000 when mapping the directory outside the container
-		// Append a "/" to the path for consistency with the "UploadConfig == nil" case
-		o.LocalDir = path.Join(TmpDir, p.Info.EgressId) + "/"
-	}
-
-	// create local directories
-	if fileDir != "" {
-		if err := os.MkdirAll(path.Join(o.LocalDir, fileDir), 0755); err != nil {
-			return err
-		}
-	} else if o.LocalDir != "" {
-		if err := os.MkdirAll(o.LocalDir, 0755); err != nil {
+	// Prepend the configuration base directory and the egress Id
+	// os.ModeDir creates a directory with mode 000 when mapping the directory outside the container
+	o.LocalDir = p.TmpDir
+	if segmentDir != "" {
+		if err := os.MkdirAll(path.Join(o.LocalDir, segmentDir), 0755); err != nil {
 			return err
 		}
 	}

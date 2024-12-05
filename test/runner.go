@@ -46,6 +46,7 @@ type Runner struct {
 	room            *lksdk.Room              `yaml:"-"`
 	updates         chan *livekit.EgressInfo `yaml:"-"`
 	sourceFramerate float64                  `yaml:"-"`
+	testNumber      int                      `yaml:"-"`
 
 	// service config
 	*config.ServiceConfig `yaml:",inline"`
@@ -118,6 +119,21 @@ func NewRunner(t *testing.T) *Runner {
 	case "track":
 		r.TrackTestsOnly = true
 		r.RoomName = fmt.Sprintf("track-integration-%d", rand.Intn(100))
+	case "file":
+		r.FileTestsOnly = true
+		r.RoomName = fmt.Sprintf("file-integration-%d", rand.Intn(100))
+	case "stream":
+		r.StreamTestsOnly = true
+		r.RoomName = fmt.Sprintf("stream-integration-%d", rand.Intn(100))
+	case "segments":
+		r.SegmentTestsOnly = true
+		r.RoomName = fmt.Sprintf("segments-integration-%d", rand.Intn(100))
+	case "images":
+		r.ImageTestsOnly = true
+		r.RoomName = fmt.Sprintf("images-integration-%d", rand.Intn(100))
+	case "multi":
+		r.MultiTestsOnly = true
+		r.RoomName = fmt.Sprintf("multi-integration-%d", rand.Intn(100))
 	case "edge":
 		r.EdgeCasesOnly = true
 		r.RoomName = fmt.Sprintf("edge-integration-%d", rand.Intn(100))

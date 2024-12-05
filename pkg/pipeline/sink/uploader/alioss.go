@@ -17,26 +17,38 @@ package uploader
 import (
 	"fmt"
 	"os"
+	"path"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 
+	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/types"
-	"github.com/livekit/protocol/livekit"
 )
 
 type AliOSSUploader struct {
-	conf *livekit.AliOSSUpload
+	conf                 *config.S3Config
+	prefix               string
+	generatePresignedUrl bool
 }
 
-func newAliOSSUploader(conf *livekit.AliOSSUpload) (uploader, error) {
+func newAliOSSUploader(c *config.StorageConfig) (uploader, error) {
+	if c.GeneratePresignedUrl {
+		return nil, errors.ErrUploadFailed("AliOSS", fmt.Errorf("presigned URLs not supported"))
+	}
+
+	conf := c.AliOSS
 	return &AliOSSUploader{
-		conf: conf,
+		conf:                 conf,
+		prefix:               c.PathPrefix,
+		generatePresignedUrl: c.GeneratePresignedUrl,
 	}, nil
 }
 
-func (u *AliOSSUploader) upload(localFilePath, requestedPath string, _ types.OutputType) (string, int64, error) {
-	stat, err := os.Stat(localFilePath)
+func (u *AliOSSUploader) upload(localFilepath, storageFilepath string, _ types.OutputType) (string, int64, error) {
+	storageFilepath = path.Join(u.prefix, storageFilepath)
+
+	stat, err := os.Stat(localFilepath)
 	if err != nil {
 		return "", 0, errors.ErrUploadFailed("AliOSS", err)
 	}
@@ -51,10 +63,10 @@ func (u *AliOSSUploader) upload(localFilePath, requestedPath string, _ types.Out
 		return "", 0, errors.ErrUploadFailed("AliOSS", err)
 	}
 
-	err = bucket.PutObjectFromFile(requestedPath, localFilePath)
+	err = bucket.PutObjectFromFile(storageFilepath, localFilepath)
 	if err != nil {
 		return "", 0, errors.ErrUploadFailed("AliOSS", err)
 	}
 
-	return fmt.Sprintf("https://%s.%s/%s", u.conf.Bucket, u.conf.Endpoint, requestedPath), stat.Size(), nil
+	return fmt.Sprintf("https://%s.%s/%s", u.conf.Bucket, u.conf.Endpoint, storageFilepath), stat.Size(), nil
 }

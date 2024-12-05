@@ -32,6 +32,7 @@ import (
 	"github.com/livekit/egress/pkg/gstreamer"
 	"github.com/livekit/egress/pkg/types"
 	"github.com/livekit/protocol/logger"
+	"github.com/livekit/psrpc"
 )
 
 const pingPeriod = time.Second * 30
@@ -56,7 +57,7 @@ func newWebsocketSink(o *config.StreamConfig, mimeType types.MimeType, callbacks
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsUrl, header)
 	if err != nil {
-		return nil, err
+		return nil, psrpc.NewError(psrpc.InvalidArgument, err)
 	}
 
 	s := &WebsocketSink{
@@ -88,7 +89,7 @@ func newWebsocketSink(o *config.StreamConfig, mimeType types.MimeType, callbacks
 				if err == io.EOF {
 					return gst.FlowEOS
 				}
-				callbacks.OnError(err)
+				callbacks.OnError(psrpc.NewError(psrpc.Unavailable, err))
 			}
 
 			return gst.FlowOK
@@ -206,14 +207,18 @@ func (s *WebsocketSink) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.closed.Swap(true) {
+		logger.Debugw("closing websocket connection")
+
 		// write close message for graceful disconnection
 		_ = s.conn.WriteMessage(websocket.CloseMessage, nil)
 
 		// terminate connection and close the `closed` channel
-		return s.conn.Close()
+		_ = s.conn.Close()
 	}
 
 	return nil
 }
 
-func (s *WebsocketSink) Cleanup() {}
+func (s *WebsocketSink) UploadManifest(_ string) (string, bool, error) {
+	return "", false, nil
+}
