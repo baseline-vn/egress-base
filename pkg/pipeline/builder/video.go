@@ -536,9 +536,9 @@ func (b *VideoBin) addEncoder() error {
 		if err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
-		x264Enc.SetArg("speed-preset", "superfast")
-		x264Enc.SetArg("tune", "zerolatency")
-		// x264Enc.SetArg("sliced-threads", "true")
+		x264Enc.SetArg("speed-preset", "veryfast")
+		// x264Enc.SetArg("tune", "zerolatency") # Turn off as it auto enabled sliced-threads, which causes overhead after 15 egress instances
+		// x264Enc.SetArg("sliced-threads", "true") # efficient < 15 egress instances - but does not scale well.
 
 		if b.conf.KeyFrameInterval != 0 {
 			keyframeInterval := uint(b.conf.KeyFrameInterval * float64(b.conf.Framerate))
