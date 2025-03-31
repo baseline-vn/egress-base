@@ -80,19 +80,21 @@ type SDKSourceParams struct {
 	Identity     string
 	TrackSource  string
 	TrackKind    string
+	ScreenShare  bool
 	AudioInCodec types.MimeType
 	VideoInCodec types.MimeType
-	AudioTrack   *TrackSource
+	AudioTracks  []*TrackSource
 	VideoTrack   *TrackSource
 }
 
 type TrackSource struct {
-	TrackID     string
-	Kind        lksdk.TrackKind
-	AppSrc      *app.Source
-	MimeType    types.MimeType
-	PayloadType webrtc.PayloadType
-	ClockRate   uint32
+	TrackID         string
+	TrackKind       lksdk.TrackKind
+	ParticipantKind lksdk.ParticipantKind
+	AppSrc          *app.Source
+	MimeType        types.MimeType
+	PayloadType     webrtc.PayloadType
+	ClockRate       uint32
 }
 
 type AudioConfig struct {
@@ -101,6 +103,7 @@ type AudioConfig struct {
 	AudioOutCodec    types.MimeType
 	AudioBitrate     int32
 	AudioFrequency   int32
+	AudioMixing      livekit.AudioMixing
 }
 
 type VideoConfig struct {
@@ -193,7 +196,9 @@ func (p *PipelineConfig) Update(request *rpc.StartEgressRequest) error {
 		}
 		egress.RedactEncodedOutputs(clone)
 
-		p.SourceType = types.SourceTypeWeb
+		p.SourceType = p.getRoomCompositeRequestType(req.RoomComposite)
+		logger.Debugw("selected room composite source type", "sourceType", p.SourceType)
+
 		p.AwaitStartSignal = true
 
 		p.Info.RoomName = req.RoomComposite.RoomName
@@ -302,6 +307,7 @@ func (p *PipelineConfig) Update(request *rpc.StartEgressRequest) error {
 		p.VideoEnabled = true
 		p.VideoDecoding = true
 		p.Identity = req.Participant.Identity
+		p.ScreenShare = req.Participant.ScreenShare
 		if p.Identity == "" {
 			return errors.ErrInvalidInput("identity")
 		}
@@ -385,6 +391,13 @@ func (p *PipelineConfig) Update(request *rpc.StartEgressRequest) error {
 
 	default:
 		return errors.ErrInvalidInput("request")
+	}
+
+	switch p.SourceType {
+	case types.SourceTypeWeb:
+		p.Info.SourceType = livekit.EgressSourceType_EGRESS_SOURCE_TYPE_WEB
+	case types.SourceTypeSDK:
+		p.Info.SourceType = livekit.EgressSourceType_EGRESS_SOURCE_TYPE_SDK
 	}
 
 	// connection info
@@ -552,6 +565,27 @@ func (p *PipelineConfig) updateOutputType(compatibleAudioCodecs map[types.MimeTy
 	}
 
 	return nil
+}
+
+func (p *PipelineConfig) getRoomCompositeRequestType(req *livekit.RoomCompositeEgressRequest) types.SourceType {
+	// Test for possible chrome-less room composition for audio only
+	if !p.EnableRoomCompositeSDKSource {
+		return types.SourceTypeWeb
+	}
+	if req.Layout != "" {
+		return types.SourceTypeWeb
+	}
+	if !req.AudioOnly {
+		return types.SourceTypeWeb
+	}
+	if req.CustomBaseUrl != "" {
+		return types.SourceTypeWeb
+	}
+
+	// apply audio mixing option
+	p.AudioMixing = req.AudioMixing
+
+	return types.SourceTypeSDK
 }
 
 // used for sdk input source

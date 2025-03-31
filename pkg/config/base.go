@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/logger"
+	"github.com/livekit/protocol/logger/medialogutils"
 	"github.com/livekit/protocol/redis"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
@@ -36,22 +37,24 @@ type BaseConfig struct {
 	WsUrl     string             `yaml:"ws_url"`     // (env LIVEKIT_WS_URL)
 
 	// optional
-	Logging              *logger.Config `yaml:"logging"`                // logging config
-	TemplateBase         string         `yaml:"template_base"`          // custom template base url
-	ClusterID            string         `yaml:"cluster_id"`             // cluster this instance belongs to
-	EnableChromeSandbox  bool           `yaml:"enable_chrome_sandbox"`  // enable Chrome sandbox, requires extra docker configuration
-	MaxUploadQueue       int            `yaml:"max_upload_queue"`       // maximum upload queue size, in minutes
-	DisallowLocalStorage bool           `yaml:"disallow_local_storage"` // require an upload config for all requests
-	IOCreateTimeout      time.Duration  `yaml:"io_create_timeout"`      // timeout for CreateEgress calls
-	IOUpdateTimeout      time.Duration  `yaml:"io_update_timeout"`      // timeout for UpdateEgress calls
+	Logging                      *logger.Config `yaml:"logging"`                          // logging config
+	TemplateBase                 string         `yaml:"template_base"`                    // custom template base url
+	ClusterID                    string         `yaml:"cluster_id"`                       // cluster this instance belongs to
+	EnableChromeSandbox          bool           `yaml:"enable_chrome_sandbox"`            // enable Chrome sandbox, requires extra docker configuration
+	MaxUploadQueue               int            `yaml:"max_upload_queue"`                 // maximum upload queue size, in minutes
+	DisallowLocalStorage         bool           `yaml:"disallow_local_storage"`           // require an upload config for all requests
+	EnableRoomCompositeSDKSource bool           `yaml:"enable_room_composite_sdk_source"` // attempt to render supported audio only room composite use cases using the SDK source instead of Chrome. This option will be removed when this becomes the default behavior eventually.
+	IOCreateTimeout              time.Duration  `yaml:"io_create_timeout"`                // timeout for CreateEgress calls
+	IOUpdateTimeout              time.Duration  `yaml:"io_update_timeout"`                // timeout for UpdateEgress calls
 
 	SessionLimits `yaml:"session_limits"` // session duration limits
 	StorageConfig *StorageConfig          `yaml:"storage,omitempty"` // storage config
 	BackupConfig  *StorageConfig          `yaml:"backup,omitempty"`  // backup config, for storage failures
 
 	// dev/debugging
-	Insecure bool        `yaml:"insecure"` // allow chrome to connect to an insecure websocket
-	Debug    DebugConfig `yaml:"debug"`    // create dot file on internal error
+	Insecure    bool                   `yaml:"insecure"`     // allow chrome to connect to an insecure websocket
+	Debug       DebugConfig            `yaml:"debug"`        // create dot file on internal error
+	ChromeFlags map[string]interface{} `yaml:"chrome_flags"` // additional flags to pass to Chrome
 }
 
 type DebugConfig struct {
@@ -98,14 +101,6 @@ func (c *BaseConfig) initLogger(values ...interface{}) error {
 	l := zl.WithValues(values...)
 
 	logger.SetLogger(l, "egress")
-	lksdk.SetLogger(&downgradeLogger{Logger: l})
+	lksdk.SetLogger(medialogutils.NewOverrideLogger(nil))
 	return nil
-}
-
-type downgradeLogger struct {
-	logger.Logger
-}
-
-func (d *downgradeLogger) Errorw(msg string, err error, keysAndValues ...interface{}) {
-	d.Logger.Warnw(msg, err, keysAndValues...)
 }

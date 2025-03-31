@@ -147,6 +147,7 @@ func NewRunner(t *testing.T) *Runner {
 	require.NoError(t, err)
 
 	r.ServiceConfig = conf
+	r.ServiceConfig.EnableRoomCompositeSDKSource = true
 
 	if conf.ApiKey == "" || conf.ApiSecret == "" || conf.WsUrl == "" {
 		t.Fatal("api key, secret, and ws url required")
@@ -192,7 +193,6 @@ func (r *Runner) StartServer(t *testing.T, svc Server, bus psrpc.MessageBus, tem
 			r.room.Disconnect()
 		}
 		r.svc.Shutdown(false, true)
-		r.svc.Drain()
 	})
 
 	// connect to room

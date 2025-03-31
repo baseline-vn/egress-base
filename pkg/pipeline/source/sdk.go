@@ -17,7 +17,6 @@ package source
 import (
 	"context"
 	"fmt"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -54,7 +53,7 @@ type SDKSource struct {
 	mu                   sync.RWMutex
 	initialized          core.Fuse
 	filenameReplacements map[string]string
-	errors               chan *subscriptionInfo
+	subs                 chan *subscriptionResult
 
 	writers map[string]*sdk.AppWriter
 	subLock sync.RWMutex
@@ -65,7 +64,7 @@ type SDKSource struct {
 	endRecording   chan struct{}
 }
 
-type subscriptionInfo struct {
+type subscriptionResult struct {
 	trackID string
 	err     error
 }
@@ -82,7 +81,7 @@ func NewSDKSource(ctx context.Context, p *config.PipelineConfig, callbacks *gstr
 			close(startRecording)
 		}),
 		filenameReplacements: make(map[string]string),
-		errors:               make(chan *subscriptionInfo, 2),
+		subs:                 make(chan *subscriptionResult, 100),
 		writers:              make(map[string]*sdk.AppWriter),
 		startRecording:       startRecording,
 		endRecording:         make(chan struct{}),
@@ -159,6 +158,11 @@ func (s *SDKSource) joinRoom() error {
 		},
 		OnDisconnected: s.onDisconnected,
 	}
+
+	if s.RequestType == types.RequestTypeRoomComposite {
+		cb.ParticipantCallback.OnTrackPublished = s.onTrackPublished
+	}
+
 	if s.RequestType == types.RequestTypeParticipant {
 		cb.ParticipantCallback.OnTrackPublished = s.onTrackPublished
 		cb.OnParticipantDisconnected = s.onParticipantDisconnected
@@ -174,6 +178,12 @@ func (s *SDKSource) joinRoom() error {
 	var fileIdentifier string
 	var w, h uint32
 	switch s.RequestType {
+	case types.RequestTypeRoomComposite:
+		fileIdentifier = s.room.Name()
+		// room_name and room_id are already handled as replacements
+
+		err = s.awaitRoomTracks()
+
 	case types.RequestTypeParticipant:
 		fileIdentifier = s.Identity
 		s.filenameReplacements["{publisher_identity}"] = s.Identity
@@ -206,40 +216,19 @@ func (s *SDKSource) joinRoom() error {
 	return nil
 }
 
-func (s *SDKSource) awaitParticipantTracks(identity string) (uint32, uint32, error) {
-	rp, err := s.getParticipant(identity)
-	if err != nil {
-		return 0, 0, err
-	}
-
+func (s *SDKSource) awaitRoomTracks() error {
 	// await expected subscriptions
-	subscribed := 0
-	pubs := rp.TrackPublications()
 	expected := 0
-	for _, pub := range pubs {
-		if shouldSubscribe(pub) {
-			expected++
+	for _, rp := range s.room.GetRemoteParticipants() {
+		pubs := rp.TrackPublications()
+		for _, pub := range pubs {
+			if s.shouldSubscribe(pub) {
+				expected++
+			}
 		}
 	}
-
-	deadline := make(chan struct{})
-	time.AfterFunc(time.Second*3, func() {
-		close(deadline)
-	})
-	done := false
-	for !done {
-		select {
-		case sub := <-s.errors:
-			if sub.err != nil {
-				return 0, 0, sub.err
-			}
-			subscribed++
-			if subscribed == expected {
-				done = true
-			}
-		case <-deadline:
-			done = true
-		}
+	if err := s.awaitExpected(expected); err != nil {
+		return err
 	}
 
 	// lock any incoming subscriptions
@@ -249,7 +238,44 @@ func (s *SDKSource) awaitParticipantTracks(identity string) (uint32, uint32, err
 	for {
 		select {
 		// check errors from any tracks published in the meantime
-		case sub := <-s.errors:
+		case sub := <-s.subs:
+			if sub.err != nil {
+				return sub.err
+			}
+		default:
+			// ready
+			s.initialized.Break()
+			return nil
+		}
+	}
+}
+
+func (s *SDKSource) awaitParticipantTracks(identity string) (uint32, uint32, error) {
+	rp, err := s.getParticipant(identity)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// await expected subscriptions
+	pubs := rp.TrackPublications()
+	expected := 0
+	for _, pub := range pubs {
+		if s.shouldSubscribe(pub) {
+			expected++
+		}
+	}
+	if err = s.awaitExpected(expected); err != nil {
+		return 0, 0, err
+	}
+
+	// lock any incoming subscriptions
+	s.subLock.Lock()
+	defer s.subLock.Unlock()
+
+	for {
+		select {
+		// check errors from any tracks published in the meantime
+		case sub := <-s.subs:
 			if sub.err != nil {
 				return 0, 0, sub.err
 			}
@@ -270,6 +296,29 @@ func (s *SDKSource) awaitParticipantTracks(identity string) (uint32, uint32, err
 	}
 }
 
+func (s *SDKSource) awaitExpected(expected int) error {
+	subscribed := 0
+	deadline := make(chan struct{})
+	time.AfterFunc(time.Second*3, func() {
+		close(deadline)
+	})
+
+	for {
+		select {
+		case sub := <-s.subs:
+			if sub.err != nil {
+				return sub.err
+			}
+			subscribed++
+			if subscribed == expected {
+				return nil
+			}
+		case <-deadline:
+			return nil
+		}
+	}
+}
+
 func (s *SDKSource) getParticipant(identity string) (*lksdk.RemoteParticipant, error) {
 	deadline := time.Now().Add(subscriptionTimeout)
 	for time.Now().Before(deadline) {
@@ -285,6 +334,10 @@ func (s *SDKSource) getParticipant(identity string) (*lksdk.RemoteParticipant, e
 
 func (s *SDKSource) awaitTracks(expecting map[string]struct{}) (uint32, uint32, error) {
 	trackCount := len(expecting)
+	waiting := make(map[string]struct{})
+	for trackID := range expecting {
+		waiting[trackID] = struct{}{}
+	}
 
 	deadline := time.After(subscriptionTimeout)
 	tracks, err := s.subscribeToTracks(expecting, deadline)
@@ -294,13 +347,13 @@ func (s *SDKSource) awaitTracks(expecting map[string]struct{}) (uint32, uint32, 
 
 	for i := 0; i < trackCount; i++ {
 		select {
-		case sub := <-s.errors:
+		case sub := <-s.subs:
 			if sub.err != nil {
 				return 0, 0, sub.err
 			}
-			delete(expecting, sub.trackID)
+			delete(waiting, sub.trackID)
 		case <-deadline:
-			for trackID := range expecting {
+			for trackID := range waiting {
 				return 0, 0, errors.ErrTrackNotFound(trackID)
 			}
 		}
@@ -376,7 +429,7 @@ func (s *SDKSource) subscribe(track lksdk.TrackPublication) error {
 func (s *SDKSource) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 	s.subLock.RLock()
 
-	if s.initialized.IsBroken() && s.RequestType != types.RequestTypeParticipant {
+	if s.initialized.IsBroken() && s.RequestType != types.RequestTypeParticipant && s.RequestType != types.RequestTypeRoomComposite {
 		s.subLock.RUnlock()
 		return
 	}
@@ -388,7 +441,7 @@ func (s *SDKSource) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.Remo
 				s.callbacks.OnError(onSubscribeErr)
 			}
 		} else {
-			s.errors <- &subscriptionInfo{
+			s.subs <- &subscriptionResult{
 				trackID: pub.SID(),
 				err:     onSubscribeErr,
 			}
@@ -398,11 +451,12 @@ func (s *SDKSource) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.Remo
 
 	s.active.Inc()
 	ts := &config.TrackSource{
-		TrackID:     pub.SID(),
-		Kind:        pub.Kind(),
-		MimeType:    types.MimeType(strings.ToLower(track.Codec().MimeType)),
-		PayloadType: track.Codec().PayloadType,
-		ClockRate:   track.Codec().ClockRate,
+		TrackID:         pub.SID(),
+		TrackKind:       pub.Kind(),
+		ParticipantKind: rp.Kind(),
+		MimeType:        types.MimeType(strings.ToLower(track.Codec().MimeType)),
+		PayloadType:     track.Codec().PayloadType,
+		ClockRate:       track.Codec().ClockRate,
 	}
 
 	<-s.callbacks.GstReady
@@ -426,7 +480,7 @@ func (s *SDKSource) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.Remo
 		s.mu.Unlock()
 
 		if !s.initialized.IsBroken() {
-			s.AudioTrack = ts
+			s.AudioTracks = append(s.AudioTracks, ts)
 		}
 
 	case types.MimeTypeH264, types.MimeTypeVP8, types.MimeTypeVP9:
@@ -501,18 +555,13 @@ func (s *SDKSource) createWriter(
 	rp *lksdk.RemoteParticipant,
 	ts *config.TrackSource,
 ) (*sdk.AppWriter, error) {
-	var logFilename string
-	if s.Debug.EnableProfiling {
-		logFilename = path.Join(s.TmpDir, fmt.Sprintf("%s.csv", track.ID()))
-	}
-
 	src, err := gst.NewElementWithName("appsrc", fmt.Sprintf("app_%s", track.ID()))
 	if err != nil {
 		return nil, errors.ErrGstPipelineError(err)
 	}
 
 	ts.AppSrc = app.SrcFromElement(src)
-	writer, err := sdk.NewAppWriter(track, pub, rp, ts, s.sync, s.callbacks, logFilename)
+	writer, err := sdk.NewAppWriter(s.PipelineConfig, track, pub, rp, ts, s.sync, s.callbacks)
 	if err != nil {
 		return nil, err
 	}
@@ -521,26 +570,42 @@ func (s *SDKSource) createWriter(
 }
 
 func (s *SDKSource) onTrackPublished(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-	if rp.Identity() != s.Identity || s.RequestType != types.RequestTypeParticipant {
+	if s.RequestType != types.RequestTypeParticipant && s.RequestType != types.RequestTypeRoomComposite {
 		return
 	}
 
-	if shouldSubscribe(pub) {
+	if s.RequestType == types.RequestTypeParticipant && rp.Identity() != s.Identity {
+		return
+	}
+
+	if s.shouldSubscribe(pub) {
 		if err := s.subscribe(pub); err != nil {
 			logger.Errorw("failed to subscribe to track", err, "trackID", pub.SID())
 		}
 	} else {
-		logger.Infow("ignoring participant track", "reason", fmt.Sprintf("source %s", pub.Source()))
+		logger.Infow("ignoring track", "reason", fmt.Sprintf("source %s", pub.Source()))
 	}
 }
 
-func shouldSubscribe(pub lksdk.TrackPublication) bool {
-	switch pub.Source() {
-	case livekit.TrackSource_CAMERA, livekit.TrackSource_MICROPHONE:
-		return true
-	default:
-		return false
+func (s *SDKSource) shouldSubscribe(pub lksdk.TrackPublication) bool {
+	switch s.RequestType {
+	case types.RequestTypeParticipant:
+		switch pub.Source() {
+		case livekit.TrackSource_CAMERA, livekit.TrackSource_MICROPHONE:
+			return !s.ScreenShare
+		default:
+			return s.ScreenShare
+		}
+	case types.RequestTypeRoomComposite:
+		switch pub.Kind() {
+		case lksdk.TrackKindAudio:
+			return s.AudioEnabled
+		case lksdk.TrackKindVideo:
+			return s.VideoEnabled
+		}
 	}
+
+	return false
 }
 
 func (s *SDKSource) onTrackMuted(pub lksdk.TrackPublication, _ lksdk.Participant) {
@@ -575,7 +640,7 @@ func (s *SDKSource) onTrackFinished(trackID string) {
 	if writer != nil {
 		writer.Drain(true)
 		active := s.active.Dec()
-		if s.RequestType == types.RequestTypeParticipant {
+		if s.RequestType == types.RequestTypeParticipant || s.RequestType == types.RequestTypeRoomComposite {
 			s.callbacks.OnTrackRemoved(trackID)
 			s.sync.RemoveTrack(trackID)
 		} else if active == 0 {
